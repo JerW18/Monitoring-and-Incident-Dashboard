@@ -16,7 +16,8 @@ Timestamps are Hong Kong Time (HKT, UTC+8) and come from `date` (`TZ=UTC-8 date`
 
 | Phase | Start | End | What I asked | Outcome |
 |---|---|---|---|---|
-| Spec | 2026-11-01 20:10:17 | | Rewrite the spec for a Python backend, update `CLAUDE.md`, delete irrelevant files, start from scratch | `SPEC.md` and `CLAUDE.md` rewritten for Python (FastAPI, asyncpg, Alembic). Old files deleted. Waiting for my approval. |
+| Spec | 2026-11-01 20:10:17 | 2026-11-01 20:21:51 | Rewrite the spec for a Python backend, update `CLAUDE.md`, delete irrelevant files, start from scratch | `SPEC.md` and `CLAUDE.md` rewritten for Python (FastAPI, asyncpg, Alembic). Old files deleted. I switched dependency management from uv to pip + venv, asked Claude whether Rust or Python is easier for others to run, then approved the spec. |
+| 1. Skeleton, compose, CI | 2026-11-01 20:21:51 | 2026-11-01 20:28:38 | Pinned requirements, FastAPI app with `/healthz`, Dockerfile, compose (Postgres, Redis, api), GitHub Actions CI, ruff/mypy/pytest config | ruff format, ruff check, mypy and pytest (2 tests against real Postgres and Redis) pass locally. The compose stack runs on Linux: `/healthz` returns 200, returns 503 with Redis stopped, and the api shuts down cleanly on SIGTERM. The CI workflow isn't verified on GitHub yet because nothing has been pushed. |
 
 ## Problems found in AI output
 
@@ -29,12 +30,23 @@ _None yet._
 - **One active incident per host+rule:** the partial unique index covers both `open` and `acknowledged`, because an acknowledged incident is still active.
 - **asyncpg with raw SQL, no ORM:** the important queries (`UNNEST` batch insert, `ON CONFLICT DO NOTHING`, compare-and-swap status update) stay visible. Alembic is used only for migrations.
 - **One Redis pubsub listener fanning out to per-client bounded queues**, instead of one Redis connection per SSE client. A slow client drops events instead of blocking the others.
-- **pip + venv with pinned `requirements.txt` instead of uv:** I chose plain pip, which needs no extra tool installed. The cost is no lockfile for transitive dependencies; only top-level packages are pinned with `==`.
+- **ruff's `ASYNC` rules are enabled** to flag blocking calls (such as `time.sleep` or sync HTTP) inside async functions, which is one of the code standards in `CLAUDE.md`.
+- **Tests use Redis DB 1** (the app uses DB 0), so running the tests never wipes live dashboard state.
+- **`/healthz` uses a 2s timeout per dependency**, so it returns 503 instead of hanging when Postgres or Redis is unreachable.
 - **A single uvicorn worker**, so there is one alert engine per container. DB idempotency keeps duplicate engines safe anyway.
 
 ## Verification
 
-_Filled in as phases complete._
+**Phase 1** (Windows host with Python 3.12.7 venv, Docker 29.9.2):
+- `ruff format --check .`: exit 0. `ruff check .`: all checks passed. `mypy`: no issues in 8 source files.
+- `pytest -v`: 2 passed against compose Postgres and Redis:
+  - `test_healthz_ok_with_real_postgres_and_redis`
+  - `test_healthz_503_when_redis_unreachable` (points Redis at an unused port)
+- `docker compose up --build -d --wait`: all three services up.
+- `curl -i localhost:8000/healthz`: `200 {"db":"ok","redis":"ok"}`.
+- `docker compose stop redis`, then curl: `503 {"db":"ok","redis":"error"}` in 0.09s. The api logged `WARNING api.routes.health health check redis failed: network:ConnectionError`. After restarting Redis it returns 200 again.
+- `docker compose stop api`: uvicorn logged `Shutting down`, then `Application shutdown complete` (graceful SIGTERM).
+- Phase 1 had no problems: every gate passed on the first run.
 
 ## Reviewer notes from the human
 
