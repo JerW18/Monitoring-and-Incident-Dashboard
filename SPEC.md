@@ -84,7 +84,7 @@ Vite, React and TypeScript, with no UI or chart libraries. The chart is a small 
 Served by nginx, which proxies `/v1` to the api with SSE buffering off.
 
 ## Tests (pytest against real Postgres and Redis)
-- Test isolation: a session fixture creates the `monitor_test` database and runs `alembic upgrade head`. Each test truncates the tables (and re-seeds the rules), and Redis uses DB 1 with `FLUSHDB`.
+- Test isolation: a session fixture runs `alembic upgrade head` into a template database. Each test gets its own fresh copy (`CREATE DATABASE ... TEMPLATE`), so it starts from exactly what the real migration produces, with no second copy of the seed data. Redis uses DB 1 with `FLUSHDB`.
 - **Unit:** state machine (every invalid transition rejected, valid ones accepted). `condition_held`: sustained breach fires, while a short breach, an oscillating series and a data gap do not.
 - **Integration:**
   1. **Idempotency:** 50 concurrent `evaluate_once` calls via `asyncio.gather` produce exactly 1 open incident.

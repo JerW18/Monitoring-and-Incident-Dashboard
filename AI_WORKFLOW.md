@@ -18,10 +18,17 @@ Timestamps are Hong Kong Time (HKT, UTC+8) and come from `date` (`TZ=UTC-8 date`
 |---|---|---|---|---|
 | Spec | 2026-11-01 20:10:17 | 2026-11-01 20:21:51 | Rewrite the spec for a Python backend, update `CLAUDE.md`, delete irrelevant files, start from scratch | `SPEC.md` and `CLAUDE.md` rewritten for Python (FastAPI, asyncpg, Alembic). Old files deleted. I switched dependency management from uv to pip + venv, asked Claude whether Rust or Python is easier for others to run, then approved the spec. |
 | 1. Skeleton, compose, CI | 2026-11-01 20:21:51 | 2026-11-01 20:28:38 | Pinned requirements, FastAPI app with `/healthz`, Dockerfile, compose (Postgres, Redis, api), GitHub Actions CI, ruff/mypy/pytest config | ruff format, ruff check, mypy and pytest (2 tests against real Postgres and Redis) pass locally. The compose stack runs on Linux: `/healthz` returns 200, returns 503 with Redis stopped, and the api shuts down cleanly on SIGTERM. The CI workflow isn't verified on GitHub yet because nothing has been pushed. |
+| 2. Schema and migrations | 2026-11-02 21:07:19 | 2026-11-02 21:16:27 | Alembic setup, `0001_init` in raw SQL, a one-shot `migrate` compose service, schema tests. I also approved Claude's proposal to change test isolation to per-test template database copies. | ruff format, ruff check, mypy and pytest (11 tests) pass locally after fixing two lint/type errors. `migrate` runs before the api and changes nothing on rerun. A deliberately failing migration kept the api from starting and rolled back. The CI workflow isn't verified on GitHub yet because nothing has been pushed. |
+
+The session was paused between 2026-11-01 20:28:38 and 2026-11-02 21:07:19, before Phase 2 started.
 
 ## Problems found in AI output
 
-_None yet._
+| # | Phase | What was wrong | How it was detected | Fix |
+|---|---|---|---|---|
+| 1 | 2 | A parametrized schema test built its SQL with an f-string, which breaks the "never build SQL by string concatenation" rule in `CLAUDE.md`. The test also had an unnecessary `DELETE`. | Claude's own review, before the first run | Pass whole SQL statements as test parameters and remove the `DELETE`. |
+| 2 | 2 | A line in `tests/test_schema.py` was 101 characters, over the 100 limit. | `ruff check` (E501) | Shortened the statement. It still fails the same constraint. |
+| 3 | 2 | `admin_execute` in `tests/conftest.py` was typed `sql.Composable`, which psycopg's `execute` doesn't accept. All tests passed at runtime, so only the type checker caught it. | `mypy` (call-overload) | Changed the type to `sql.Composed`. |
 
 ## Decisions and trade-offs
 
@@ -33,6 +40,9 @@ _None yet._
 - **ruff's `ASYNC` rules are enabled** to flag blocking calls (such as `time.sleep` or sync HTTP) inside async functions, which is one of the code standards in `CLAUDE.md`.
 - **Tests use Redis DB 1** (the app uses DB 0), so running the tests never wipes live dashboard state.
 - **`/healthz` uses a 2s timeout per dependency**, so it returns 503 instead of hanging when Postgres or Redis is unreachable.
+- **Test isolation uses per-test database copies:** migrations run once into a template database, and each test gets `CREATE DATABASE ... TEMPLATE`. This replaced the original truncate-and-re-seed plan, so tests start from what the real migration produces and there's no second copy of the seed data. The full suite of 11 tests takes about 5.5s, 2s of which is the Redis-unreachable health test.
+- **Migrations run in a one-shot `migrate` service**, and the api waits for it to exit successfully. A failed migration stops the api from starting instead of letting it run against the wrong schema.
+- **`psycopg` is installed only for Alembic and test setup.** The app itself uses asyncpg, so request paths never touch a sync driver.
 - **A single uvicorn worker**, so there is one alert engine per container. DB idempotency keeps duplicate engines safe anyway.
 
 ## Verification
@@ -47,6 +57,15 @@ _None yet._
 - `docker compose stop redis`, then curl: `503 {"db":"ok","redis":"error"}` in 0.09s. The api logged `WARNING api.routes.health health check redis failed: network:ConnectionError`. After restarting Redis it returns 200 again.
 - `docker compose stop api`: uvicorn logged `Shutting down`, then `Application shutdown complete` (graceful SIGTERM).
 - Phase 1 had no problems: every gate passed on the first run.
+
+**Phase 2** (same environment):
+- `ruff format --check .`: exit 0. `ruff check .`: failed once (problem #2), then passed. `mypy`: failed once (problem #3), then no issues in 11 source files.
+- `pytest -q`: 11 passed. `pg_database` showed 0 leftover `monitor_test%` databases afterwards.
+- `test_migration_downgrades_and_upgrades_again` runs a real downgrade to empty and upgrades again.
+- `docker compose up --build -d --wait`: `migrate` logged `Running upgrade -> 0001` and exited 0, then the api started and `/healthz` returned 200.
+- `psql \d incidents` showed `incidents_one_active UNIQUE ... WHERE status = ANY (ARRAY['open', 'acknowledged'])`, and `alert_rules` held the two seeded rules.
+- Rerunning `docker compose up migrate`: no `Running upgrade` line, exit 0.
+- Failure test: I mounted a throwaway `0002` migration (creates a table, then `SELECT 1/0`) into `migrate` for one run. Compose reported `service "migrate" didn't complete successfully: exit 1`, the api stayed down (curl couldn't connect), `alembic_version` stayed at `0001`, and the table didn't exist, so the transaction rolled back. The file was never in the repo, and the normal stack came back with `/healthz` 200.
 
 ## Reviewer notes from the human
 

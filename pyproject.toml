@@ -10,7 +10,7 @@ select = ["E", "F", "W", "I", "B", "UP", "ASYNC"]
 
 [tool.mypy]
 python_version = "3.12"
-packages = ["api", "tests"]
+files = ["api", "tests", "migrations"]
 disallow_untyped_defs = true
 check_untyped_defs = true
 warn_unused_ignores = true

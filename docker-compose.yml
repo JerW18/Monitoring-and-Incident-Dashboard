@@ -26,6 +26,15 @@ services:
       timeout: 3s
       retries: 15
 
+  migrate:
+    build: .
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      DATABASE_URL: postgresql://monitor:monitor@postgres:5432/monitor
+    depends_on:
+      postgres:
+        condition: service_healthy
+
   api:
     build: .
     environment:
@@ -34,8 +43,8 @@ services:
     ports:
       - "8000:8000"
     depends_on:
-      postgres:
-        condition: service_healthy
+      migrate:
+        condition: service_completed_successfully
       redis:
         condition: service_healthy
 
