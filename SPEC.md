@@ -42,9 +42,9 @@ web (Vite build, nginx) ── /v1/* proxied to api ── EventSource /v1/event
 ## API (`api/`)
 | Endpoint | Notes |
 |---|---|
-| `POST /v1/metrics` | `X-API-Key` compared to env `API_KEY` with `hmac.compare_digest`. Pydantic validation: 1–1000 samples, host_id `^[a-z0-9-]{1,64}$`, name `^[a-z_]{1,32}$`, finite value, optional ts within ±5 min (defaults to now). One transaction does the hosts upsert and an `INSERT ... SELECT FROM UNNEST($1::text[], ...)`. Then a pipelined `SET host:{id} <latest json> EX 30` and `PUBLISH events`. Returns 202 `{accepted: n}` |
-| `GET /v1/hosts` | Hosts from PG plus up/down and latest values from Redis (`MGET`) |
-| `GET /v1/metrics?host_id&name&since` | Chart history, at most 1h and 2000 rows |
+| `POST /v1/metrics` | `X-API-Key` compared to env `API_KEY` with `hmac.compare_digest`. Pydantic validation: 1–1000 samples, host_id `^[a-z0-9-]{1,64}$`, name `^[a-z_]{1,32}$`, finite value, optional ts within ±5 min (defaults to now). The key is checked before the body is read, and bodies over 1 MB get 413. One transaction does the hosts upsert (in sorted order, to avoid deadlocks) and an `INSERT ... SELECT FROM UNNEST($1::text[], ...)`. Then an atomic pipeline runs `HSET host:{id} <metric> <latest value> ...`, `EXPIRE host:{id} 30` and `PUBLISH events`. If Redis fails after the commit, the error is logged and the response is still 202, because the metrics are stored. Returns 202 `{accepted: n}` |
+| `GET /v1/hosts` | Hosts from PG plus up/down and latest values from Redis (pipelined `HGETALL`). 503 if Redis is unreachable, because status is unknown |
+| `GET /v1/metrics?host_id&name&since` | Chart history. `since` is clamped to the last 1h, and the newest 2000 rows are returned, oldest first |
 | `GET /v1/incidents?status=` | List |
 | `POST /v1/incidents/{id}/ack`, `/resolve` | Go through the state machine. 404 if the incident is unknown, 409 on an invalid transition |
 | `GET/POST /v1/rules`, `PUT/DELETE /v1/rules/{id}` | Pydantic-validated. Built-in rules can't be deleted, and a rule with history returns 409 |
@@ -69,7 +69,7 @@ Modules:
 - **Threshold rules:** fetch each host's samples in `[now - duration - grace, now]`. The pure function `evaluate.condition_held(samples, rule, now) -> bool` returns true only when the window `[now-duration, now]` has samples, all of them breach, and the earliest is within `grace` (10s) of the window start. That way one bad sample can't fire the rule. If the condition holds and no cooldown key exists, the engine runs `INSERT ... ON CONFLICT DO NOTHING` and publishes an event only when a row was inserted.
 - **Auto-resolve:** when an active incident exists and the latest sample no longer breaches, it resolves through the state machine and runs `SET cooldown:{rule}:{host} 1 EX cooldown_secs`.
 - **Flapping:** the full-duration requirement means an oscillating metric never fires. The cooldown blocks immediate re-opening after recovery.
-- **Host down:** a known host whose `host:{id}` key is missing gets a host_down incident. When the key reappears, the incident auto-resolves, with the same cooldown. `HOST_TTL_SECS` (default 30) is configurable so tests can use 2s.
+- **Host down:** a known host gets a host_down incident when its `host:{id}` key is missing **and** `hosts.last_seen` is older than the TTL. The second check prevents false alarms after a Redis outage or flush, when keys are missing for hosts that are still reporting. When the key reappears, the incident auto-resolves, with the same cooldown. `HOST_TTL_SECS` (default 30) is configurable so tests can use 2s.
 - **Redis keys:** every key has a TTL. The pub/sub channel isn't a key and stores nothing.
 
 ## Simulator (`agent/`)
@@ -97,7 +97,7 @@ Served by nginx, which proxies `/v1` to the api with SSE buffering off.
 ## Phases (each one: build → run → test → show output → update AI_WORKFLOW.md → hand the human a commit list → pause for review)
 1. Skeleton, compose and CI: `requirements*.txt`, `pyproject.toml` (tool config), the FastAPI app with `/healthz`, the Dockerfile, compose (postgres, redis, api), ci.yml, ruff and mypy config.
 2. Schema: Alembic setup, `0001_init`, the `migrate` service and the schema tests.
-3. Ingestion API.
+3. Ingestion API, plus `GET /v1/hosts` and `GET /v1/metrics`.
 4. Simulator.
 5. Alert engine and its unit tests.
 6. Incident API and rules CRUD.

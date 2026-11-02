@@ -40,6 +40,7 @@ services:
     environment:
       DATABASE_URL: postgresql://monitor:monitor@postgres:5432/monitor
       REDIS_URL: redis://redis:6379/0
+      API_KEY: ${API_KEY:-dev-key}
     ports:
       - "8000:8000"
     depends_on:

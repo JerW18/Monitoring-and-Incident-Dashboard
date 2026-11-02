@@ -12,6 +12,8 @@ import pytest
 from alembic import command
 from alembic.config import Config
 from psycopg import sql
+from pydantic import SecretStr
+from redis.asyncio import Redis
 
 from api.config import Settings
 from api.main import create_app
@@ -20,6 +22,7 @@ from api.main import create_app
 DATABASE_URL = os.environ.get("DATABASE_URL", "postgresql://monitor:monitor@localhost:5432/monitor")
 REDIS_URL = os.environ.get("REDIS_URL", "redis://localhost:6379/1")
 
+API_KEY = "test-key"
 TEMPLATE_DB = "monitor_test_template"
 ALEMBIC_INI = Path(__file__).parent.parent / "alembic.ini"
 
@@ -78,7 +81,17 @@ async def db(database_url: str) -> AsyncIterator[asyncpg.Pool]:
 
 @pytest.fixture
 def settings(database_url: str) -> Settings:
-    return Settings(database_url=database_url, redis_url=REDIS_URL)
+    return Settings(database_url=database_url, redis_url=REDIS_URL, api_key=SecretStr(API_KEY))
+
+
+@pytest.fixture
+async def redis_client() -> AsyncIterator[Redis]:
+    """Tests use their own Redis DB (1 by default), emptied before and after each test."""
+    client = Redis.from_url(REDIS_URL, decode_responses=True)
+    await client.flushdb()
+    yield client
+    await client.flushdb()
+    await client.aclose()
 
 
 @pytest.fixture
