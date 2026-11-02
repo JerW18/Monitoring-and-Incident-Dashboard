@@ -81,7 +81,13 @@ async def db(database_url: str) -> AsyncIterator[asyncpg.Pool]:
 
 @pytest.fixture
 def settings(database_url: str) -> Settings:
-    return Settings(database_url=database_url, redis_url=REDIS_URL, api_key=SecretStr(API_KEY))
+    # The engine is off by default so that tests control exactly when evaluation runs.
+    return Settings(
+        database_url=database_url,
+        redis_url=REDIS_URL,
+        api_key=SecretStr(API_KEY),
+        alert_engine_enabled=False,
+    )
 
 
 @pytest.fixture

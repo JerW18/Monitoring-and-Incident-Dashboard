@@ -9,3 +9,5 @@ class Settings(BaseSettings):
     redis_url: str
     api_key: SecretStr = Field(min_length=1)
     host_ttl_secs: int = Field(default=30, gt=0)
+    alert_engine_enabled: bool = True
+    alert_interval_secs: float = Field(default=5.0, gt=0)

@@ -62,14 +62,14 @@ Modules:
 
 `create_app(settings)` lets the tests drive the app with `httpx.AsyncClient(transport=ASGITransport(app))`.
 
-**State machine (`incidents.py`, the only place transitions are defined):** the allowed transitions are `open→acknowledged`, `open→resolved` and `acknowledged→resolved`. Anything else raises `InvalidTransition`. The DB write is a compare-and-swap, `UPDATE ... SET status=$new WHERE id=$1 AND status=$expected RETURNING ...`. If it returns no row, the status is re-read and the request gets a 409 (or a 404 if the incident doesn't exist). Manual resolve and auto-resolve both use this path.
+**State machine (`incidents.py`, the only place transitions are defined):** the allowed transitions are `open→acknowledged`, `open→resolved` and `acknowledged→resolved`. Anything else raises `InvalidTransition`. The DB write is a compare-and-swap, `UPDATE ... SET status=$new WHERE id=$1 AND status=$expected RETURNING ...`. If it returns no row, the status changed underneath it, so the transition is re-read and re-checked: acknowledge racing resolve still ends resolved, and an invalid result is a 409 (or a 404 if the incident doesn't exist). Manual resolve and auto-resolve both use this path, and both set the cooldown just before the write, so clicking Resolve while the condition still holds doesn't reopen the incident on the next tick. Cooldown and event failures are logged, not raised, because Postgres is the source of truth.
 
 ## Alert engine
-- An asyncio task created in the FastAPI lifespan and cancelled on shutdown. Each tick (5s, configurable) calls `evaluate_once(pool, redis, settings)`. Exceptions are logged and the loop keeps running.
-- **Threshold rules:** fetch each host's samples in `[now - duration - grace, now]`. The pure function `evaluate.condition_held(samples, rule, now) -> bool` returns true only when the window `[now-duration, now]` has samples, all of them breach, and the earliest is within `grace` (10s) of the window start. That way one bad sample can't fire the rule. If the condition holds and no cooldown key exists, the engine runs `INSERT ... ON CONFLICT DO NOTHING` and publishes an event only when a row was inserted.
-- **Auto-resolve:** when an active incident exists and the latest sample no longer breaches, it resolves through the state machine and runs `SET cooldown:{rule}:{host} 1 EX cooldown_secs`.
+- An asyncio task created in the FastAPI lifespan and cancelled on shutdown. Each tick (5s, configurable) calls `evaluate_once(pool, redis, settings)`. Exceptions are logged and the loop keeps running. If Redis is unreachable the tick stops before changing anything, because cooldowns and host status are unknown.
+- **Threshold rules:** fetch each host's samples in `[now - duration - grace, now]`. The pure function `evaluate.condition_held(...)` returns true only when the last sample at or before the window start and every sample after it all breach, and no gap between samples, or between the last sample and now, exceeds `grace` (10s). So one bad sample, a short breach, stale data or a gap can't fire the rule, and neither can a new host with too little history. If the condition holds and no cooldown key exists, the engine runs `INSERT ... ON CONFLICT DO NOTHING` and publishes an event only when a row was inserted.
+- **Auto-resolve:** when an active incident exists and the newest sample no longer breaches, it resolves through the state machine and runs `SET cooldown:{rule}:{host} 1 EX cooldown_secs` (skipped when `cooldown_secs` is 0). If a host stops reporting while still breaching, the incident stays open, because recovery is unknown. Disabled rules open nothing new, but their active incidents still auto-resolve.
 - **Flapping:** the full-duration requirement means an oscillating metric never fires. The cooldown blocks immediate re-opening after recovery.
-- **Host down:** a known host gets a host_down incident when its `host:{id}` key is missing **and** `hosts.last_seen` is older than the TTL. The second check prevents false alarms after a Redis outage or flush, when keys are missing for hosts that are still reporting. When the key reappears, the incident auto-resolves, with the same cooldown. `HOST_TTL_SECS` (default 30) is configurable so tests can use 2s.
+- **Host down:** a known host gets a host_down incident when its `host:{id}` key is missing **and** `hosts.last_seen` is older than the TTL. The second check prevents false alarms after a Redis outage or flush, when keys are missing for hosts that are still reporting. The engine also skips this check until it has been running for one TTL: after an API outage, hosts look stale only because they couldn't report. When the key reappears, the incident auto-resolves, with the same cooldown. `HOST_TTL_SECS` (default 30) is configurable so tests can use 2s.
 - **Redis keys:** every key has a TTL. The pub/sub channel isn't a key and stores nothing.
 
 ## Simulator (`agent/`)
@@ -99,8 +99,8 @@ Served by nginx, which proxies `/v1` to the api with SSE buffering off.
 2. Schema: Alembic setup, `0001_init`, the `migrate` service and the schema tests.
 3. Ingestion API, plus `GET /v1/hosts` and `GET /v1/metrics`.
 4. Simulator.
-5. Alert engine and its unit tests.
-6. Incident API and rules CRUD.
+5. Alert engine, the state machine and their tests.
+6. Incident API (on the existing state machine) and rules CRUD.
 7. SSE.
 8. Frontend and the full `docker compose up`.
 9. Tests: complete the integration suite.
@@ -111,6 +111,7 @@ Served by nginx, which proxies `/v1` to the api with SSE buffering off.
 - No multi-tenancy, notifications or Kubernetes.
 - No metric retention or downsampling.
 - A single API instance and worker is assumed, with no engine leader election. DB idempotency keeps duplicate engines safe.
+- After a Postgres outage, hosts can look stale for one tick and briefly open false host-down incidents, which then auto-resolve.
 
 ## Verification (end-to-end)
 1. `docker compose up --build` brings up the dashboard at http://localhost:8080 with 5 green hosts.

@@ -17,11 +17,11 @@ from pydantic import (
 from redis.exceptions import RedisError
 
 from api.auth import require_api_key
+from api.events import EVENTS_CHANNEL
 
 log = logging.getLogger(__name__)
 router = APIRouter()
 
-EVENTS_CHANNEL = "events"
 MAX_BODY_BYTES = 1_000_000
 MAX_SAMPLES = 1000
 MAX_TS_SKEW = timedelta(minutes=5)

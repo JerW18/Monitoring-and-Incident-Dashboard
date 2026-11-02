@@ -21,6 +21,7 @@ Timestamps are Hong Kong Time (HKT, UTC+8) and come from `date` (`TZ=UTC-8 date`
 | 2. Schema and migrations | 2026-11-02 21:07:19 | 2026-11-02 21:16:27 | Alembic setup, `0001_init` in raw SQL, a one-shot `migrate` compose service, schema tests. I also approved Claude's proposal to change test isolation to per-test template database copies. | ruff format, ruff check, mypy and pytest (11 tests) pass locally after fixing two lint/type errors. `migrate` runs before the api and changes nothing on rerun. A deliberately failing migration kept the api from starting and rolled back. The CI workflow isn't verified on GitHub yet because nothing has been pushed. |
 | 3. Ingestion API | 2026-11-02 21:21:13 | 2026-11-02 21:29:15 | `POST /v1/metrics` with key auth and validation, plus `GET /v1/hosts` and `GET /v1/metrics`. I approved four changes Claude proposed to the spec (see Decisions). | All gates pass with 56 tests. Five deliberate code breaks were each caught by a test. On the compose stack, curl returned 202, 401, 422 and 413, rows reached Postgres, and hosts went down after the TTL. The CI workflow isn't verified on GitHub yet because nothing has been pushed. |
 | 4. Simulator | 2026-11-02 21:33:19 | 2026-11-02 21:43:32 | `python -m agent` with fake hosts and `--spike-cpu` and `--stop` fault flags, and a compose service. Before this phase I ran `docker compose down -v` myself to clear the Phase 3 test hosts. | All gates pass with 71 tests. Deliberate code breaks exposed one weak test, which Claude fixed and then re-checked. On compose, 5 hosts report, host-3 stays at 95–99% CPU, host-2 goes down after it stops, and reporting recovers by itself after an api restart. The CI workflow isn't verified on GitHub yet because nothing has been pushed. |
+| 5. Alert engine | 2026-11-02 21:53:20 | 2026-11-02 22:17:01 | Background engine, state machine, cooldowns, auto-resolve and the host-down rule. I approved six corrections Claude proposed to its own spec (see Decisions). | All gates pass with 128 tests, including the required idempotency, flapping, host-down and state machine tests. On compose, a spike opened an incident at about 33s and a stopped host at about 53s, both auto-resolved on recovery, and an api outage caused no false alarms. A Redis retry change Claude made turned out to make things worse, so it was measured and reverted. The CI workflow isn't verified on GitHub yet because nothing has been pushed. |
 
 The session was paused between 2026-11-01 20:28:38 and 2026-11-02 21:07:19, before Phase 2 started.
 
@@ -39,6 +40,15 @@ The session was paused between 2026-11-01 20:28:38 and 2026-11-02 21:07:19, befo
 | 9 | 4 | `test_keeps_reporting_after_failures` only counted calls. With `raise_for_status` removed, a rejected request (such as a wrong API key) would have counted as success with nothing logged, and the test still passed. | Deliberate code break (mutation check) reported `MISSED` | The test now also checks the logged failures and the recovery message. The same break is now caught. |
 | 10 | 4 | A line in `agent/simulator.py` was too long. | `ruff format --check` and `ruff check` (E501) | Shortened the message. |
 | 11 | 4 | Claude predicted that without `init: true` the agent would hang for 10s on stop. The behavior was right but the number was wrong. | Measured: without init, `docker stop` took 3.6s and exited 137 (killed) | The log records the measured values. `init: true` stays. |
+| 12 | 5 | The spec's "held for the full duration" check could fire on stale data (a host that stopped 25s ago), across a gap in the data, or early for a new host. | Claude's review of the spec while planning the phase, before any code | `condition_held` now needs the last sample at or before the window start and everything after it to breach, with no gap over 10s, up to now. |
+| 13 | 5 | Other spec gaps: manual resolve would reopen on the next tick while the condition still held, `cooldown_secs = 0` would send Redis an invalid `EX 0`, and disabled rules' incidents would never clear. | Claude's review of the spec while planning the phase | Resolve always sets the cooldown just before the status write, 0 skips the cooldown, and auto-resolve ignores `enabled`. Each has a test. |
+| 14 | 5 | After an API outage every host's key has expired, so the first tick would open false host-down incidents for all of them. | Claude's review while writing the engine | The engine skips the host-down check for one TTL after starting. Confirmed by a test and on compose (a 40s api outage opened nothing, see Verification). |
+| 15 | 5 | `test_gap_at_exactly_the_limit_still_fires` had wrong arithmetic: its "10s" gap was really 12s. The over-the-limit test had the wrong gap too, though it passed. | `pytest` failure | Added a `with_gap` helper that states the gap directly. |
+| 16 | 5 | One line wasn't formatted as ruff requires, and a test polling loop tripped ruff's ASYNC110. | `ruff format`, `ruff check` | Formatted the line. The loop has to poll Postgres, so it has an explained `noqa`. |
+| 17 | 5 | `redis.ping()` at the start of each tick was redundant, because the status pipeline already raises when Redis is down. | Claude's own review | Removed it. |
+| 18 | 5 | Claude's first mutation run after these fixes silently repeated Phase 4's list, because the write of the new list had been rejected. All results said `CAUGHT`, but none tested the engine. | Reading the output: the labels were about the simulator | Rewrote the list and ran it again. |
+| 19 | 5 | Two tests were too weak: the future-sample test passed even without the future filter (the gap check also rejected its data), and the zero-cooldown test passed without the guard (the Redis error was caught and only logged). | Deliberate code breaks (mutation check) reported `MISSED` for 2 of 20 | The first now uses data where only the filter changes the result, and the second also checks the log. All 20 are caught. |
+| 20 | 5 | **A wrong fix by Claude.** A test took 8.2s with Redis down, and Claude concluded the client's default retries were the cause, then added `Retry(NoBackoff(), 1)` with a comment saying so. The test still took 8s. Measured against a frozen Redis, the default gave up in 2.0s and the "fix" took 4.0s, so the change made it twice as slow and the comment was false. | Measuring before accepting the code comment as true (`docker compose pause redis`) | Reverted to the default retries and kept the 2s timeouts. A frozen Redis now costs 2.0s per request. The slow test is now 4s, most likely Windows being slow to refuse connections on localhost; I didn't confirm that. |
 
 ## Decisions and trade-offs
 
@@ -63,6 +73,10 @@ The session was paused between 2026-11-01 20:28:38 and 2026-11-02 21:07:19, befo
 - **Fault flags naming an unknown host exit with an error**, because a typo would otherwise inject nothing and look like an alerting bug.
 - **`init: true` on the agent container:** Python as PID 1 ignores SIGTERM unless it installs a handler. This is one compose line instead of signal-handling code.
 - **The agent doesn't resend failed reports.** The next tick sends fresh data, so an api outage leaves a gap in the metrics rather than duplicates.
+- **Incident status lives in Postgres, and everything in Redis is best effort after that.** A person can resolve an incident during a Redis outage, and failed cooldowns or events are logged. The engine is the exception: it stops the tick if Redis is down, because it can't read cooldowns or host status.
+- **Compare-and-swap with re-check for status changes.** If the status changed underneath an update, the transition is checked again, so acknowledge racing resolve ends resolved instead of returning a false error.
+- **The engine's sample query uses `CROSS JOIN LATERAL` per host**, so it uses the `(host_id, name, ts)` index however large `metrics` grows. `EXPLAIN` confirmed the index scan.
+- **Known side effect, accepted:** `ON CONFLICT DO NOTHING` uses up a sequence value on each conflict, so incident ids have gaps (the demo's two incidents were 1 and 5). They are only identifiers, so I left this.
 - **A single uvicorn worker**, so there is one alert engine per container. DB idempotency keeps duplicate engines safe anyway.
 
 ## Verification
@@ -123,6 +137,28 @@ The session was paused between 2026-11-01 20:28:38 and 2026-11-02 21:07:19, befo
   - The agent logged `host-2: stopped reporting` at 20s, and host-2's last CPU sample was at 13:42:23 UTC.
   - At 13:43:01 UTC, 38s later, `/v1/hosts` showed host-2 `down` and the other hosts `up`. I checked at that point, so this doesn't measure the exact expiry moment.
 - api restart while the agent ran: 22 `report failed` warnings with no agent crash. All 5 hosts logged `reporting again` within 1s of each other, and all 5 were `up` afterwards.
+
+**Phase 5** (same environment):
+- `ruff format --check .`, `ruff check .`, `mypy`: failed during the phase (problem #16), now all pass, with no issues in 28 source files.
+- `pytest -q`: 128 passed in about 45s against real Postgres and Redis. This includes the required tests:
+  - `test_many_concurrent_evaluators_open_exactly_one_incident` (50 concurrent evaluators, 1 incident, 1 event)
+  - `test_oscillating_metric_opens_nothing_across_many_ticks` and `test_recovery_then_new_breach_is_blocked_only_by_the_cooldown`
+  - `test_host_down_after_ttl_expires_and_resolves_on_next_report`
+  - `test_invalid_transitions_are_rejected`, covering every invalid pair
+- Deliberate breaks: 20 made one at a time and restored. 18 were caught at first, and all 20 after fixing two tests (problem #19).
+- Fault injection on compose with `--spike-cpu host-3 --stop host-2`:
+  - 40s healthy run first: 0 incidents.
+  - host-3 `High CPU` incident opened 33s after the fault started (`cpu > 90 for 30s`).
+  - host-2 `Host down` incident opened 53s after the fault started (20s stop delay + 30s TTL + tick).
+  - No incidents on the healthy hosts.
+- Normal agent restored: both incidents auto-resolved within 7s. Cooldown keys had TTLs of 57 and 56. 25s later there were still 2 incidents in total and 0 active.
+- api stopped for 40s (0 host keys left in Redis), then restarted: incidents stayed at 2 after waiting past the 30s startup grace, and all hosts came back `up`.
+- Redis failure timings after the revert (problem #20):
+  - Frozen with `docker compose pause`: `POST /v1/metrics` 202 in 2.05s, `GET /v1/hosts` 503 in 2.01s.
+  - Stopped: `POST /v1/metrics` 202 in 1.24s, `GET /v1/hosts` 503 in 0.03s.
+  - An engine failure was logged during the freeze, with 0 active incidents afterwards.
+- `EXPLAIN (ANALYZE)` on the engine's sample query with 5530 rows: `Bitmap Index Scan on metrics_host_name_ts`, 0.15ms.
+- Not rerun: the fault-injection demo ran before the retry revert. That revert changes only the Redis client's retry setting, and I reran the tests and failure timings afterwards, but not the full demo.
 
 ## Reviewer notes from the human
 
