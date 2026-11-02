@@ -73,7 +73,7 @@ Modules:
 - **Redis keys:** every key has a TTL. The pub/sub channel isn't a key and stores nothing.
 
 ## Simulator (`agent/`)
-`python -m agent` with flags `--api-url --api-key --hosts N --interval 2 --spike-cpu host-3 (repeatable) --stop host-2 (repeatable) --stop-after 20`. Each host is an asyncio task sending cpu, mem and disk as a random walk, with spiked hosts pinned at about 97% CPU. It uses one shared `httpx.AsyncClient`, and on errors it logs and retries next tick. Compose runs 5 healthy hosts. To demo a fault: `docker compose stop agent && docker compose run --rm agent --hosts 5 --spike-cpu host-3 --stop host-2`.
+`python -m agent` with flags `--api-url --api-key --hosts N --interval 2 --spike-cpu host-3 (repeatable) --stop host-2 (repeatable) --stop-after 20`. Each host is an asyncio task sending cpu, mem and disk as a random walk. Healthy CPU stays within 10–70%, so a healthy host can't open an incident by chance, and spiked hosts stay within 95–99%. Fault flags naming an unknown host are rejected at startup. The agent sends no timestamps; the server assigns them. It uses one shared `httpx.AsyncClient`, and on errors it logs and retries next tick. Compose runs 5 healthy hosts. To demo a fault: `docker compose stop agent && docker compose run --rm agent --hosts 5 --spike-cpu host-3 --stop host-2`.
 
 ## Frontend (`web/`)
 Vite, React and TypeScript, with no UI or chart libraries. The chart is a small hand-written SVG line chart. One page:

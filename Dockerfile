@@ -1,4 +1,4 @@
-# One image for the api and migrate services (and later the agent).
+# One image for the api, migrate and agent services.
 FROM python:3.12-slim
 
 ENV PYTHONDONTWRITEBYTECODE=1 \
@@ -13,6 +13,7 @@ RUN pip install -r requirements.txt
 COPY alembic.ini .
 COPY migrations ./migrations
 COPY api ./api
+COPY agent ./agent
 
 RUN useradd --system --no-create-home app
 USER app

@@ -49,5 +49,17 @@ services:
       redis:
         condition: service_healthy
 
+  agent:
+    build: .
+    entrypoint: ["python", "-m", "agent"]
+    command: ["--hosts", "5"]
+    # Python as PID 1 ignores SIGTERM unless it installs a handler; init forwards it properly.
+    init: true
+    environment:
+      API_URL: http://api:8000
+      API_KEY: ${API_KEY:-dev-key}
+    depends_on:
+      - api
+
 volumes:
   pgdata:

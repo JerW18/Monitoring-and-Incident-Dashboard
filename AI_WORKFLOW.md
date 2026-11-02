@@ -20,6 +20,7 @@ Timestamps are Hong Kong Time (HKT, UTC+8) and come from `date` (`TZ=UTC-8 date`
 | 1. Skeleton, compose, CI | 2026-11-01 20:21:51 | 2026-11-01 20:28:38 | Pinned requirements, FastAPI app with `/healthz`, Dockerfile, compose (Postgres, Redis, api), GitHub Actions CI, ruff/mypy/pytest config | ruff format, ruff check, mypy and pytest (2 tests against real Postgres and Redis) pass locally. The compose stack runs on Linux: `/healthz` returns 200, returns 503 with Redis stopped, and the api shuts down cleanly on SIGTERM. The CI workflow isn't verified on GitHub yet because nothing has been pushed. |
 | 2. Schema and migrations | 2026-11-02 21:07:19 | 2026-11-02 21:16:27 | Alembic setup, `0001_init` in raw SQL, a one-shot `migrate` compose service, schema tests. I also approved Claude's proposal to change test isolation to per-test template database copies. | ruff format, ruff check, mypy and pytest (11 tests) pass locally after fixing two lint/type errors. `migrate` runs before the api and changes nothing on rerun. A deliberately failing migration kept the api from starting and rolled back. The CI workflow isn't verified on GitHub yet because nothing has been pushed. |
 | 3. Ingestion API | 2026-11-02 21:21:13 | 2026-11-02 21:29:15 | `POST /v1/metrics` with key auth and validation, plus `GET /v1/hosts` and `GET /v1/metrics`. I approved four changes Claude proposed to the spec (see Decisions). | All gates pass with 56 tests. Five deliberate code breaks were each caught by a test. On the compose stack, curl returned 202, 401, 422 and 413, rows reached Postgres, and hosts went down after the TTL. The CI workflow isn't verified on GitHub yet because nothing has been pushed. |
+| 4. Simulator | 2026-11-02 21:33:19 | 2026-11-02 21:43:32 | `python -m agent` with fake hosts and `--spike-cpu` and `--stop` fault flags, and a compose service. Before this phase I ran `docker compose down -v` myself to clear the Phase 3 test hosts. | All gates pass with 71 tests. Deliberate code breaks exposed one weak test, which Claude fixed and then re-checked. On compose, 5 hosts report, host-3 stays at 95–99% CPU, host-2 goes down after it stops, and reporting recovers by itself after an api restart. The CI workflow isn't verified on GitHub yet because nothing has been pushed. |
 
 The session was paused between 2026-11-01 20:28:38 and 2026-11-02 21:07:19, before Phase 2 started.
 
@@ -35,6 +36,9 @@ The session was paused between 2026-11-01 20:28:38 and 2026-11-02 21:07:19, befo
 | 6 | 3 | A line in `tests/test_ingest.py` wasn't formatted as ruff requires. | `ruff format --check` | Ran `ruff format`. |
 | 7 | 3 | Hosts were sorted twice, in Python and in SQL. | Claude's own review after the first test run | Kept only the SQL `ORDER BY`. |
 | 8 | 3 | Claude's first curl run against compose returned `HTTP 000` for 7 requests. `docker compose up --wait` returned before uvicorn was listening, because the api has no healthcheck. The endpoints weren't at fault, but that evidence was invalid. | Runtime behavior, visible in the command output | Reran the requests once the api was listening. The missing healthcheck isn't fixed yet; it's on the list for Phase 8, where the web service will depend on the api. |
+| 9 | 4 | `test_keeps_reporting_after_failures` only counted calls. With `raise_for_status` removed, a rejected request (such as a wrong API key) would have counted as success with nothing logged, and the test still passed. | Deliberate code break (mutation check) reported `MISSED` | The test now also checks the logged failures and the recovery message. The same break is now caught. |
+| 10 | 4 | A line in `agent/simulator.py` was too long. | `ruff format --check` and `ruff check` (E501) | Shortened the message. |
+| 11 | 4 | Claude predicted that without `init: true` the agent would hang for 10s on stop. The behavior was right but the number was wrong. | Measured: without init, `docker stop` took 3.6s and exited 137 (killed) | The log records the measured values. `init: true` stays. |
 
 ## Decisions and trade-offs
 
@@ -55,6 +59,10 @@ The session was paused between 2026-11-01 20:28:38 and 2026-11-02 21:07:19, befo
 - **`GET /v1/hosts` returns 503 when Redis is unreachable**, rather than reporting every host as down.
 - **`value` is strictly numeric:** `"97"` and `true` are rejected instead of coerced.
 - **Hosts are upserted in sorted order**, so concurrent batches can't deadlock. Removing the sort made the concurrency test fail, so the risk is real.
+- **Healthy simulated CPU is limited to 10–70%.** A random walk with no limit could stay above 90% for 30s and open a real incident on a healthy host, ruining the demo.
+- **Fault flags naming an unknown host exit with an error**, because a typo would otherwise inject nothing and look like an alerting bug.
+- **`init: true` on the agent container:** Python as PID 1 ignores SIGTERM unless it installs a handler. This is one compose line instead of signal-handling code.
+- **The agent doesn't resend failed reports.** The next tick sends fresh data, so an api outage leaves a gap in the metrics rather than duplicates.
 - **A single uvicorn worker**, so there is one alert engine per container. DB idempotency keeps duplicate engines safe anyway.
 
 ## Verification
@@ -96,6 +104,25 @@ The session was paused between 2026-11-01 20:28:38 and 2026-11-02 21:07:19, befo
 - `psql` showed the 3 rows. `redis-cli` showed `HGETALL host:web-1` with cpu and mem, and `TTL` 28.
 - TTL expiry: 35s after `web-1` last reported, `GET /v1/hosts` showed it `down` with no metrics. I checked once at that point, so this doesn't measure the exact expiry moment.
 - Redis stopped: `POST` returned 202 in 1.27s, the row reached Postgres, the api logged `redis update failed after metrics were committed`, and `GET /v1/hosts` returned 503.
+
+**Phase 4** (same environment):
+- `ruff format --check .` and `ruff check .`: failed once (problem #10), then passed. `mypy`: no issues in 20 source files.
+- `pytest -q`: 71 passed in about 27s.
+- Deliberate breaks, each made temporarily and then restored. All 6 are caught now, one only after fixing a weak test (problem #9):
+  - host names not checked against fault flags
+  - walk not limited to its range
+  - `--spike-cpu` having no effect
+  - `--stop` having no effect
+  - a failed request crashing the loop
+  - no `raise_for_status`
+- Real CLI: `python -m agent --spike-cpu host-9` exits 2 with `unknown hosts ['host-9']`. With no key, it exits 2 with `an API key is required`.
+- `docker compose up --build -d`: all 5 hosts `up`, with row counts growing from 129 to 165 in about 4s.
+- `docker compose stop agent`: 0.84s, exit 143. The same image without `init` took 3.6s and exited 137.
+- Fault injection with `docker compose run --rm agent --hosts 5 --spike-cpu host-3 --stop host-2`:
+  - host-3's CPU stayed at 95.0–99.0.
+  - The agent logged `host-2: stopped reporting` at 20s, and host-2's last CPU sample was at 13:42:23 UTC.
+  - At 13:43:01 UTC, 38s later, `/v1/hosts` showed host-2 `down` and the other hosts `up`. I checked at that point, so this doesn't measure the exact expiry moment.
+- api restart while the agent ran: 22 `report failed` warnings with no agent crash. All 5 hosts logged `reporting again` within 1s of each other, and all 5 were `up` afterwards.
 
 ## Reviewer notes from the human
 
