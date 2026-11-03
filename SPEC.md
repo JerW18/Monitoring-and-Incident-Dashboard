@@ -54,7 +54,7 @@ web (Vite build, nginx) ── /v1/* proxied to api ── EventSource /v1/event
 Modules:
 - `config.py` (pydantic-settings)
 - `db.py` (asyncpg pool)
-- `errors.py` (domain exceptions mapped to HTTP status codes by exception handlers)
+- `errors.py` (domain exceptions mapped to HTTP status codes by exception handlers, and a 503 while Postgres is unavailable)
 - `routes/{metrics,hosts,incidents,rules,events}.py`
 - `incidents.py` (the state machine)
 - `alerts/{evaluate.py, engine.py}`
@@ -69,7 +69,7 @@ Modules:
 - **Threshold rules:** fetch each host's samples in `[now - duration - grace, now]`. The pure function `evaluate.condition_held(...)` returns true only when the last sample at or before the window start and every sample after it all breach, and no gap between samples, or between the last sample and now, exceeds `grace` (10s). So one bad sample, a short breach, stale data or a gap can't fire the rule, and neither can a new host with too little history. If the condition holds and no cooldown key exists, the engine runs `INSERT ... ON CONFLICT DO NOTHING` and publishes an event only when a row was inserted.
 - **Auto-resolve:** when an active incident exists and the newest sample no longer breaches, it resolves through the state machine and runs `SET cooldown:{rule}:{host} 1 EX cooldown_secs` (skipped when `cooldown_secs` is 0). If a host stops reporting while still breaching, the incident stays open, because recovery is unknown. Disabled rules open nothing new, but their active incidents still auto-resolve.
 - **Flapping:** the full-duration requirement means an oscillating metric never fires. The cooldown blocks immediate re-opening after recovery.
-- **Host down:** a known host gets a host_down incident when its `host:{id}` key is missing **and** `hosts.last_seen` is older than the TTL. The second check prevents false alarms after a Redis outage or flush, when keys are missing for hosts that are still reporting. The engine also skips this check until it has been running for one TTL: after an API outage, hosts look stale only because they couldn't report. When the key reappears, the incident auto-resolves, with the same cooldown. `HOST_TTL_SECS` (default 30) is configurable so tests can use 2s.
+- **Host down:** a known host gets a host_down incident when its `host:{id}` key is missing **and** `hosts.last_seen` is older than the TTL. The second check prevents false alarms after a Redis outage or flush, when keys are missing for hosts that are still reporting. The engine also skips this check for one TTL after starting and after any failed tick: after an outage of the API or Postgres, hosts look stale only because their reports couldn't be stored. When the key reappears, the incident auto-resolves, with the same cooldown. `HOST_TTL_SECS` (default 30) is configurable so tests can use 2s.
 - **Redis keys:** every key has a TTL. The pub/sub channel isn't a key and stores nothing.
 
 ## Simulator (`agent/`)
@@ -116,7 +116,6 @@ Served by non-root nginx, which proxies `/v1` to the api with SSE buffering off 
 - No automated frontend tests: CI only checks that the frontend compiles. The dashboard was verified with a one-off browser script that isn't in the repo.
 - No metric retention or downsampling.
 - A single API instance and worker is assumed, with no engine leader election. DB idempotency keeps duplicate engines safe.
-- After a Postgres outage, hosts can look stale for one tick and briefly open false host-down incidents, which then auto-resolve.
 
 ## Verification (end-to-end)
 1. `docker compose up --build` brings up the dashboard at http://localhost:8080 with 5 green hosts.

@@ -1,10 +1,25 @@
 """Domain exceptions and their HTTP status codes, all in one place."""
 
+import logging
+
+import asyncpg
 from fastapi import FastAPI, Request, status
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import JSONResponse
 
 from api.incidents import IncidentNotFound, InvalidTransition
+
+log = logging.getLogger(__name__)
+
+# What a request sees while Postgres is unreachable or restarting, as measured against a
+# real outage. OSError covers refused connections, timeouts and socket.gaierror: when the
+# container stops, its name stops resolving too. CannotConnectNowError isn't a kind of
+# PostgresConnectionError, so it's listed separately. Errors from a bad query aren't here.
+DATABASE_UNAVAILABLE = (
+    asyncpg.PostgresConnectionError,
+    asyncpg.CannotConnectNowError,
+    OSError,
+)
 
 
 class RuleNotFound(Exception):
@@ -39,3 +54,13 @@ def register_exception_handlers(app: FastAPI) -> None:
         return JSONResponse({"detail": detail}, status_code=status.HTTP_422_UNPROCESSABLE_CONTENT)
 
     app.add_exception_handler(RequestValidationError, handle_validation)
+
+    async def handle_database_down(request: Request, exc: Exception) -> JSONResponse:
+        # A known, temporary condition: one log line rather than a traceback per request.
+        log.warning("database unavailable for %s %s: %r", request.method, request.url.path, exc)
+        return JSONResponse(
+            {"detail": "database unavailable"}, status_code=status.HTTP_503_SERVICE_UNAVAILABLE
+        )
+
+    for exception_type in DATABASE_UNAVAILABLE:
+        app.add_exception_handler(exception_type, handle_database_down)

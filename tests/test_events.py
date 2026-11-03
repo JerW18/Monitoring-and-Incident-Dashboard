@@ -37,8 +37,9 @@ class LiveServer:
     url: str
 
 
-@pytest.fixture
-async def live(settings: Settings, redis_client: Redis) -> AsyncIterator[LiveServer]:
+@asynccontextmanager
+async def serve(settings: Settings, redis_client: Redis) -> AsyncIterator[LiveServer]:
+    """Runs the app on a real uvicorn server, on a free port."""
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
     app = create_app(settings)
@@ -58,6 +59,12 @@ async def live(settings: Settings, redis_client: Redis) -> AsyncIterator[LiveSer
     server.force_exit = True
     await task
     sock.close()
+
+
+@pytest.fixture
+async def live(settings: Settings, redis_client: Redis) -> AsyncIterator[LiveServer]:
+    async with serve(settings, redis_client) as server:
+        yield server
 
 
 class Stream:

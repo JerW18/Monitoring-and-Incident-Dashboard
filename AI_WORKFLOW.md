@@ -25,8 +25,9 @@ Timestamps are Hong Kong Time (HKT, UTC+8) and come from `date` (`TZ=UTC-8 date`
 | 6. Incident API and rules CRUD | 2026-11-03 09:52:06 | 2026-11-03 10:03:50 | Expose the state machine over HTTP and add rules CRUD. I approved five decisions Claude proposed (see Decisions). | All gates pass with 198 tests. A new test caught a real 500 on non-finite input, now fixed. All 20 deliberate breaks were caught. On compose, every endpoint and error code behaved as intended, a rule created over the API fired on all 5 hosts, and a manual resolve during a spike held through the 60s cooldown before a new incident opened. The CI workflow isn't verified on GitHub yet because nothing has been pushed. |
 | 7. SSE | 2026-11-03 10:07:25 | 2026-11-03 10:29:43 | Redis pub/sub to an SSE endpoint, with cleanup on disconnect. I approved five decisions Claude proposed. I also noticed the demo was taking too long and asked if it was done, which is when Claude found the run was invalid. | All gates pass with 212 tests, with the real agent publishing. This fixed a required test that had been failing whenever the stack was running. On compose, metrics and incident events streamed live, the stream survived a Redis restart, and `stop api` took about 1.6s with a stream open. One shutdown error line remains (problem #28). The CI workflow isn't verified on GitHub yet because nothing has been pushed. |
 | 8. Frontend and full compose | 2026-11-03 10:35:28 | 2026-11-03 10:53:57 | React dashboard, nginx, an api healthcheck and the CI web job. I approved four spec corrections Claude proposed, and chose no frontend test framework in the repo. | `docker compose down -v && up --build` brings up everything. A real browser ran the spec's full demo with no reload: the spike, the host going down, Ack and Resolve clicks, and recovery from API and Redis outages. It found a real phone layout bug, and looking at screenshots found a lingering error message; both are fixed. All Python gates and `npm run build` pass. The CI workflow isn't verified on GitHub yet because nothing has been pushed. |
+| 9. Tests | 2026-11-03 12:48:49 | 2026-11-03 13:20:52 | Complete the test suite. The required tests already existed, so Claude measured for gaps first, and I approved its plan. I asked Claude to push to GitHub, which ran CI for the first time and passed. | 246 tests pass, including under heavy CPU load in random order. A real Postgres outage found that the API returned 500s, and after two wrong attempts it now returns 503s. The flakiness run found a real flaky test, now fixed. A false host-down limitation was removed. |
 
-The session was paused between 2026-11-01 20:28:38 and 2026-11-02 21:07:19, before Phase 2 started, and between 2026-11-02 22:17:01 and 2026-11-03 09:52:06, before Phase 6 started.
+The session was paused between 2026-11-01 20:28:38 and 2026-11-02 21:07:19, before Phase 2 started, between 2026-11-02 22:17:01 and 2026-11-03 09:52:06, before Phase 6 started, and between 2026-11-03 11:14 (approximately, when I paused after the first CI run) and 12:48:49, before Phase 9 started. Claude measured coverage and wrote the Phase 9 plan at 11:08 before that pause.
 
 ## Problems found in AI output
 
@@ -65,6 +66,12 @@ The session was paused between 2026-11-01 20:28:38 and 2026-11-02 21:07:19, befo
 | 31 | 8 | A refused-action error stayed on screen indefinitely. It was still showing long after, in the Reconnecting state. | Claude looking at the screenshots, not an automated check | The message now clears itself after 8s. |
 | 32 | 8 | The browser script called `innerText` on an SVG element, which aborted its first run. This was a script bug, not a dashboard bug. | Runtime error; the script stops at the first failure | Used `textContent`, and reran from a clean stack. |
 | 33 | 8 | `App.tsx` had a clumsy workaround that set state during render to pick a default host. | Claude's own review, before the first browser run | The hook now works out the selected host directly. |
+| 34 | 9 | During a real Postgres outage every data endpoint returned a plain `500`, with 128 tracebacks in about 45s of logs. Claude had never taken Postgres down on the running stack. | Runtime behavior: a measured outage on compose | They now return `503 {"detail":"database unavailable"}` with a one-line log entry. |
+| 35 | 9 | **The first two fixes for #34 were wrong.** The first passed its tests but still returned 500 in a real outage, because the tests stubbed errors Claude had guessed. The real error was `socket.gaierror`: a stopped container's name stops resolving. Claude then narrowed the list on a false claim, stated as fact, that `DataError` is a kind of `InterfaceError`, which also broke tests. | Rerunning the real outage, reading the actual exceptions from the logs, and checking the class hierarchy with `issubclass` | The list now matches the measured errors, with `OSError` covering `gaierror`. The third real outage returned 503 on every endpoint. |
+| 36 | 9 | `ts-too-new` was flaky. Its "+6 minutes" timestamp was worked out at test collection, and under load the suite takes 4 minutes, so by the time it ran the timestamp was back inside the 5-minute limit and rightly accepted. It failed 2 runs out of 2 under load, and could have failed in CI on a slow machine. | The flakiness run: heavy CPU load, random order | The timestamp is now worked out inside the test. A new test had the same hazard and was fixed too. |
+| 37 | 9 | A known limitation Claude wrote in Phase 5 was never measured: false host-down incidents after a Postgres outage. The first outage run didn't show any, but only by timing luck. | Reasoning about tick timing after the measurement | A failed tick now restarts the host-down grace period, covered by a test, and the limitation is removed from `SPEC.md`. |
+| 38 | 9 | Claude's outage script left a fake `probe` host in my local database, which would have gone down and opened a false incident. | Claude reading the output of its own script | Removed it, and the script now uses a real host. |
+| 39 | 9 | A wrong type in the new test file (`redis.keys` is typed as bytes). | `mypy` | Fixed. |
 
 ## Decisions and trade-offs
 
@@ -107,6 +114,8 @@ The session was paused between 2026-11-01 20:28:38 and 2026-11-02 21:07:19, befo
 - **The chart breaks its line across gaps over 10s** rather than drawing through time with no data, and it has a fixed 0–100 axis so a small wobble doesn't look like a spike.
 - **Status never relies on color alone:** tiles and incidents always show a word and an icon.
 - **No frontend test framework in the repo (my choice).** Claude verified the page with a one-off Playwright script that isn't committed, so CI only checks that the frontend compiles. Frontend regressions wouldn't be caught automatically. It's listed as a known limitation.
+- **While Postgres is unreachable, data endpoints return 503.** `/healthz`, the dashboard page and the SSE stream stay up, and the agent logs failures and carries on. Metrics sent during an outage are lost, not queued, so the chart shows a gap.
+- **One gap in the tests is accepted:** `rules.py:104` runs only if a rule is deleted between two statements, and a test would need heavy mocking to prove very little.
 - **A single uvicorn worker**, so there is one alert engine per container. DB idempotency keeps duplicate engines safe anyway.
 
 ## Verification
@@ -235,6 +244,20 @@ The session was paused between 2026-11-01 20:28:38 and 2026-11-02 21:07:19, befo
 - Browser console errors: only the expected ones (a request the script blocked on purpose, the deliberate 409, and failed requests during the outage). None during the Redis restart, and no page errors.
 - nginx comparison, with the api forced onto a new IP: static `proxy_pass` went from 200 to 502; `web/nginx.conf` stayed at 200.
 - Not covered: the deliberate-break checks used in earlier phases, because there is no frontend test suite to run them against.
+
+**CI:** the first push to GitHub ran [CI run 41570702745](https://github.com/JerW18/Monitoring-and-Incident-Dashboard/actions/runs/41570702745), which passed both jobs at commit `f4ac0eb`: `python` (install, ruff, mypy, pytest with Postgres and Redis service containers) and `web` (`npm ci`, build). It was the first time the tests ran on Linux. The Phase 9 changes aren't on GitHub yet at the time of writing, so CI hasn't checked them.
+
+**Phase 9** (same environment):
+- `ruff format --check .` and `ruff check .` pass, and `mypy` has no issues in 36 source files, after fixing problem #39.
+- `pytest -q` with the stack running: 246 passed in about 99s (it was 212 before this phase).
+- Flakiness: under heavy CPU load (48 busy processes on 24 CPUs), in random order, with the stack running. Before the fixes, 2 runs had 6 failures each (problems #35 and #36). After the fixes, 1 run had 246 passed in about 237s.
+- Coverage (one-off, not in the repo): 97% across lines and branches. What's left: `agent/__main__.py` shows 0% because it now runs in a subprocess, which coverage doesn't follow; two loop-exit branches; and `rules.py:104`.
+- Deliberate breaks: 11 made one at a time and restored, all caught. They cover the engine and hub starting with the app, ack events, each kind of Redis TTL, the resolve race, the agent as a process, the 503 handler, and the restarted grace period.
+- New tests worth noting: the full chain over real HTTP and SSE with the engine running by itself; every Redis key having a TTL after real activity; a person and the engine resolving at the same moment; `python -m agent` as a real process.
+- Real Postgres outage on compose, stopped for about 45s (longer than the TTL), with the agent running. Final run:
+  - During: `/healthz` 503; `POST /v1/metrics`, `/v1/hosts`, `/v1/incidents` and `/v1/rules` all `503 {"detail":"database unavailable"}`; dashboard page 200; SSE stream connected.
+  - After: `/healthz` 200 in under 1s, ingest 202, all 5 hosts up, and rows growing. Incidents stayed at 11, so no false ones opened.
+  - API log tracebacks fell from 128-130 to 15. 9 of those are the engine's failed ticks, logged on purpose; I didn't look at the other 6.
 
 ## Reviewer notes from the human
 

@@ -108,8 +108,6 @@ async def test_invalid_raw_body_is_rejected(client: httpx.AsyncClient, payload: 
         pytest.param(sample(value="97"), id="value-string"),  # type: ignore[arg-type]
         pytest.param(sample(value=True), id="value-bool"),
         pytest.param(sample(ts="2026-01-01T00:00:00"), id="ts-without-timezone"),
-        pytest.param(sample(ts=iso(timedelta(minutes=-6))), id="ts-too-old"),
-        pytest.param(sample(ts=iso(timedelta(minutes=6))), id="ts-too-new"),
         pytest.param(sample(ts="0001-01-01T00:00:00+14:00"), id="ts-year-one"),
         pytest.param(sample(extra="x"), id="unknown-field"),
     ],
@@ -121,6 +119,17 @@ async def test_invalid_sample_is_rejected_and_nothing_is_stored(
     assert resp.status_code == 422
     assert await db.fetchval("SELECT count(*) FROM metrics") == 0
     assert await db.fetchval("SELECT count(*) FROM hosts") == 0
+
+
+@pytest.mark.parametrize("minutes", [-6, 6], ids=["too-old", "too-new"])
+async def test_timestamp_outside_the_allowed_skew_is_rejected(
+    client: httpx.AsyncClient, db: asyncpg.Pool, minutes: int
+) -> None:
+    # Worked out here, not in a parametrize list: that runs at collection, and a slow suite can
+    # reach this test minutes later, when "6 minutes from now" is back inside the limit.
+    resp = await post(client, sample(ts=iso(timedelta(minutes=minutes))))
+    assert resp.status_code == 422
+    assert await db.fetchval("SELECT count(*) FROM metrics") == 0
 
 
 async def test_batch_size_limit(client: httpx.AsyncClient, db: asyncpg.Pool) -> None:

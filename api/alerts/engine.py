@@ -157,11 +157,13 @@ async def evaluate_once(
 async def run_engine(pool: asyncpg.Pool, redis: Redis, settings: Settings) -> None:
     started = time.monotonic()
     while True:
-        # After an API outage, hosts look stale only because they couldn't report. Give them
-        # one TTL to report again before treating a missing key as a host going down.
+        # After an outage of the API or Postgres, hosts look stale only because their reports
+        # couldn't be stored. Give them one TTL to report again before treating a missing key
+        # as a host going down.
         check_host_down = time.monotonic() - started >= settings.host_ttl_secs
         try:
             await evaluate_once(pool, redis, settings, check_host_down)
         except Exception:  # one bad tick must not stop alerting; the next tick retries
             log.exception("alert evaluation failed")
+            started = time.monotonic()
         await asyncio.sleep(settings.alert_interval_secs)

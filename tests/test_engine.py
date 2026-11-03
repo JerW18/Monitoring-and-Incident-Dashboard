@@ -193,6 +193,26 @@ async def test_acknowledged_incident_auto_resolves(
     assert row["acknowledged_at"] is not None
 
 
+async def test_person_resolving_during_the_tick_is_not_an_error(
+    db: asyncpg.Pool,
+    redis_client: Redis,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    await add_samples(db, BAD)
+    await evaluate_once(db, redis_client, settings)
+    await add_samples(db, GOOD, oldest=0)
+
+    async def person_gets_there_first(pool: asyncpg.Pool, redis: Redis, incident_id: int) -> None:
+        # Between the engine reading the incident and resolving it.
+        await resolve(pool, redis, incident_id)
+        await resolve(pool, redis, incident_id)  # the engine's own attempt, now invalid
+
+    monkeypatch.setattr(engine, "resolve", person_gets_there_first)
+    await evaluate_once(db, redis_client, settings)  # must not raise
+    assert [r["status"] for r in await incidents(db)] == ["resolved"]
+
+
 async def test_stale_breaching_data_does_not_auto_resolve(
     db: asyncpg.Pool, redis_client: Redis, settings: Settings
 ) -> None:
@@ -345,6 +365,39 @@ async def test_loop_skips_host_down_for_one_ttl_after_starting(
     with pytest.raises(asyncio.CancelledError):
         await task
     assert [r["rule"] for r in await incidents(db)] == ["Host down"]
+
+
+async def test_loop_skips_host_down_for_one_ttl_after_a_failed_tick(
+    db: asyncpg.Pool,
+    redis_client: Redis,
+    settings: Settings,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """After a Postgres outage, hosts look stale only because their reports weren't stored."""
+    checks: list[bool] = []
+    finished = asyncio.Event()
+
+    async def tick(pool: object, redis: object, config: object, check_host_down: bool) -> None:
+        checks.append(check_host_down)
+        if check_host_down and checks.count(True) == 1:
+            raise RuntimeError("database down")
+        if checks.count(True) == 2:
+            finished.set()
+
+    monkeypatch.setattr(engine, "evaluate_once", tick)
+    config = settings.model_copy(update={"alert_interval_secs": 0.01, "host_ttl_secs": 1})
+    task = asyncio.create_task(run_engine(db, redis_client, config))
+    async with asyncio.timeout(10):
+        await finished.wait()
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    # Grace, the check turned on and failed, grace again, then the check turned back on.
+    first_true = checks.index(True)
+    assert first_true > 0
+    assert checks[first_true + 1] is False, "the failed tick restarts the grace period"
+    assert checks[-1] is True
 
 
 async def test_app_lifespan_runs_the_engine_and_stops_it(
