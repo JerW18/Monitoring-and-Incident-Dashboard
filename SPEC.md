@@ -45,9 +45,9 @@ web (Vite build, nginx) ── /v1/* proxied to api ── EventSource /v1/event
 | `POST /v1/metrics` | `X-API-Key` compared to env `API_KEY` with `hmac.compare_digest`. Pydantic validation: 1–1000 samples, host_id `^[a-z0-9-]{1,64}$`, name `^[a-z_]{1,32}$`, finite value, optional ts within ±5 min (defaults to now). The key is checked before the body is read, and bodies over 1 MB get 413. One transaction does the hosts upsert (in sorted order, to avoid deadlocks) and an `INSERT ... SELECT FROM UNNEST($1::text[], ...)`. Then an atomic pipeline runs `HSET host:{id} <metric> <latest value> ...`, `EXPIRE host:{id} 30` and `PUBLISH events`. If Redis fails after the commit, the error is logged and the response is still 202, because the metrics are stored. Returns 202 `{accepted: n}` |
 | `GET /v1/hosts` | Hosts from PG plus up/down and latest values from Redis (pipelined `HGETALL`). 503 if Redis is unreachable, because status is unknown |
 | `GET /v1/metrics?host_id&name&since` | Chart history. `since` is clamped to the last 1h, and the newest 2000 rows are returned, oldest first |
-| `GET /v1/incidents?status=` | List |
+| `GET /v1/incidents?status=` | Newest 200 incidents, with the rule name |
 | `POST /v1/incidents/{id}/ack`, `/resolve` | Go through the state machine. 404 if the incident is unknown, 409 on an invalid transition |
-| `GET/POST /v1/rules`, `PUT/DELETE /v1/rules/{id}` | Pydantic-validated. Built-in rules can't be deleted, and a rule with history returns 409 |
+| `GET/POST /v1/rules`, `PUT/DELETE /v1/rules/{id}` | Pydantic-validated: `duration_secs` 1–3600 (the engine loads that window every tick), `cooldown_secs` 0–86400, finite `threshold`. Only threshold rules can be created. `PUT` on the built-in rule accepts only `name`, `cooldown_secs` and `enabled`. Built-in rules can't be deleted. A duplicate name or a rule with history returns 409, from the database constraint |
 | `GET /v1/events` | SSE with keep-alive pings |
 | `GET /healthz` | `SELECT 1` and Redis `PING`, each with a 2s timeout. 200, or 503 naming the failing dependency |
 
@@ -107,7 +107,8 @@ Served by nginx, which proxies `/v1` to the api with SSE buffering off.
 10. README with Mermaid diagram, curl, fault-injection and test instructions, and known limitations. Compute the total elapsed time in AI_WORKFLOW.
 
 ## Known limitations (README)
-- No user accounts, and no auth on dashboard endpoints (only ingest requires a key).
+- No user accounts, and no auth on dashboard endpoints (only ingest requires a key), so anyone who can reach the API can acknowledge incidents or change rules.
+- `GET /v1/incidents` returns only the newest 200, with no pagination.
 - No multi-tenancy, notifications or Kubernetes.
 - No metric retention or downsampling.
 - A single API instance and worker is assumed, with no engine leader election. DB idempotency keeps duplicate engines safe.

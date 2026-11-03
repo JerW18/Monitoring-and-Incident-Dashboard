@@ -22,8 +22,9 @@ Timestamps are Hong Kong Time (HKT, UTC+8) and come from `date` (`TZ=UTC-8 date`
 | 3. Ingestion API | 2026-11-02 21:21:13 | 2026-11-02 21:29:15 | `POST /v1/metrics` with key auth and validation, plus `GET /v1/hosts` and `GET /v1/metrics`. I approved four changes Claude proposed to the spec (see Decisions). | All gates pass with 56 tests. Five deliberate code breaks were each caught by a test. On the compose stack, curl returned 202, 401, 422 and 413, rows reached Postgres, and hosts went down after the TTL. The CI workflow isn't verified on GitHub yet because nothing has been pushed. |
 | 4. Simulator | 2026-11-02 21:33:19 | 2026-11-02 21:43:32 | `python -m agent` with fake hosts and `--spike-cpu` and `--stop` fault flags, and a compose service. Before this phase I ran `docker compose down -v` myself to clear the Phase 3 test hosts. | All gates pass with 71 tests. Deliberate code breaks exposed one weak test, which Claude fixed and then re-checked. On compose, 5 hosts report, host-3 stays at 95–99% CPU, host-2 goes down after it stops, and reporting recovers by itself after an api restart. The CI workflow isn't verified on GitHub yet because nothing has been pushed. |
 | 5. Alert engine | 2026-11-02 21:53:20 | 2026-11-02 22:17:01 | Background engine, state machine, cooldowns, auto-resolve and the host-down rule. I approved six corrections Claude proposed to its own spec (see Decisions). | All gates pass with 128 tests, including the required idempotency, flapping, host-down and state machine tests. On compose, a spike opened an incident at about 33s and a stopped host at about 53s, both auto-resolved on recovery, and an api outage caused no false alarms. A Redis retry change Claude made turned out to make things worse, so it was measured and reverted. The CI workflow isn't verified on GitHub yet because nothing has been pushed. |
+| 6. Incident API and rules CRUD | 2026-11-03 09:52:06 | 2026-11-03 10:03:50 | Expose the state machine over HTTP and add rules CRUD. I approved five decisions Claude proposed (see Decisions). | All gates pass with 198 tests. A new test caught a real 500 on non-finite input, now fixed. All 20 deliberate breaks were caught. On compose, every endpoint and error code behaved as intended, a rule created over the API fired on all 5 hosts, and a manual resolve during a spike held through the 60s cooldown before a new incident opened. The CI workflow isn't verified on GitHub yet because nothing has been pushed. |
 
-The session was paused between 2026-11-01 20:28:38 and 2026-11-02 21:07:19, before Phase 2 started.
+The session was paused between 2026-11-01 20:28:38 and 2026-11-02 21:07:19, before Phase 2 started, and between 2026-11-02 22:17:01 and 2026-11-03 09:52:06, before Phase 6 started.
 
 ## Problems found in AI output
 
@@ -49,6 +50,8 @@ The session was paused between 2026-11-01 20:28:38 and 2026-11-02 21:07:19, befo
 | 18 | 5 | Claude's first mutation run after these fixes silently repeated Phase 4's list, because the write of the new list had been rejected. All results said `CAUGHT`, but none tested the engine. | Reading the output: the labels were about the simulator | Rewrote the list and ran it again. |
 | 19 | 5 | Two tests were too weak: the future-sample test passed even without the future filter (the gap check also rejected its data), and the zero-cooldown test passed without the guard (the Redis error was caught and only logged). | Deliberate code breaks (mutation check) reported `MISSED` for 2 of 20 | The first now uses data where only the filter changes the result, and the second also checks the log. All 20 are caught. |
 | 20 | 5 | **A wrong fix by Claude.** A test took 8.2s with Redis down, and Claude concluded the client's default retries were the cause, then added `Retry(NoBackoff(), 1)` with a comment saying so. The test still took 8s. Measured against a frozen Redis, the default gave up in 2.0s and the "fix" took 4.0s, so the change made it twice as slow and the comment was false. | Measuring before accepting the code comment as true (`docker compose pause redis`) | Reverted to the default retries and kept the 2s timeouts. A frozen Redis now costs 2.0s per request. The slow test is now 4s, most likely Windows being slow to refuse connections on localhost; I didn't confirm that. |
+| 21 | 6 | `"threshold": 1e999` on the rules endpoints returned a 500 instead of a 422. Validation rejected it correctly, but FastAPI's default error response echoes the rejected value, and `inf` can't be written as JSON, so the error handler itself crashed. | `pytest`: `test_non_finite_threshold_is_rejected` failed with `Out of range float values are not JSON compliant` | Added one validation handler for the whole app that never echoes input. |
+| 22 | 6 | A line in `tests/test_incidents_api.py` was too long. | `ruff format --check` and `ruff check` (E501) | Ran `ruff format`. |
 
 ## Decisions and trade-offs
 
@@ -77,6 +80,11 @@ The session was paused between 2026-11-01 20:28:38 and 2026-11-02 21:07:19, befo
 - **Compare-and-swap with re-check for status changes.** If the status changed underneath an update, the transition is checked again, so acknowledge racing resolve ends resolved instead of returning a false error.
 - **The engine's sample query uses `CROSS JOIN LATERAL` per host**, so it uses the `(host_id, name, ts)` index however large `metrics` grows. `EXPLAIN` confirmed the index scan.
 - **Known side effect, accepted:** `ON CONFLICT DO NOTHING` uses up a sequence value on each conflict, so incident ids have gaps (the demo's two incidents were 1 and 5). They are only identifiers, so I left this.
+- **Rule limits are on purpose:** `duration_secs` is at most 3600 because the engine loads that whole window of samples every tick, and ids are range-checked so an id too large for the column is a 422 rather than a 500.
+- **The built-in host-down rule can be renamed, tuned or disabled, but not turned into another kind of rule or deleted.** Only threshold rules can be created.
+- **Rule conflicts come from database constraints, not a check beforehand**, so two simultaneous requests can't both pass a check and then collide.
+- **The incident list returns the newest 200, with no pagination.** The table grows forever and pagination is out of scope. It's listed as a known limitation.
+- **Validation errors never echo the rejected input.** This fixed problem #21, and it also keeps request data out of error responses.
 - **A single uvicorn worker**, so there is one alert engine per container. DB idempotency keeps duplicate engines safe anyway.
 
 ## Verification
@@ -159,6 +167,20 @@ The session was paused between 2026-11-01 20:28:38 and 2026-11-02 21:07:19, befo
   - An engine failure was logged during the freeze, with 0 active incidents afterwards.
 - `EXPLAIN (ANALYZE)` on the engine's sample query with 5530 rows: `Bitmap Index Scan on metrics_host_name_ts`, 0.15ms.
 - Not rerun: the fault-injection demo ran before the retry revert. That revert changes only the Redis client's retry setting, and I reran the tests and failure timings afterwards, but not the full demo.
+
+**Phase 6** (same environment):
+- `ruff format --check .` and `ruff check .`: failed once (problem #22), then passed. `mypy`: no issues in 33 source files.
+- `pytest -q`: 198 passed in about 57s. It failed once before the fix for problem #21.
+- Deliberate breaks: 20 made one at a time and restored, all caught on the first run. They cover the status code mappings, the status filter, ordering and the limit, id range checks, strict input, the duration limits, the built-in rule protections and the history conflict.
+- curl on compose:
+  - Rules: create 201; duplicate name 409; `1e999` 422; duration 3601 422; `PUT` host-down with a metric 422; delete built-in 409; delete a rule with history 409; unknown rule 404; id too large 422.
+  - Incidents: ack 200; second ack 409; ack or resolve on a resolved incident 409; unknown id 404; id too large 422; unknown status 422.
+- A rule created over the API (`mem > 1 for 10s`) opened incidents on all 5 running hosts 12s later. After disabling it and resolving them by hand, with a cooldown of 0 and the condition still true, nothing reopened in the next 15s.
+- Resolving during a real spike (`--spike-cpu host-3`):
+  - The incident opened 36s after the spike started and stayed the only active one for host-3 after an ack.
+  - After a manual resolve with CPU still high, nothing reopened 15s later, inside the cooldown.
+  - A new incident opened 61s after the resolve (60s cooldown, problem still there), which is the intended behavior.
+- Normal agent restored: no active incidents 6s later. `tracebacks in api log: 0` for the whole run.
 
 ## Reviewer notes from the human
 

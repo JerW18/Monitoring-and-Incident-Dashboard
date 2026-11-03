@@ -9,7 +9,8 @@ from redis.asyncio import Redis
 
 from api.alerts.engine import run_engine
 from api.config import Settings
-from api.routes import health, hosts, metrics
+from api.errors import register_exception_handlers
+from api.routes import health, hosts, incidents, metrics, rules
 
 # A hung Redis must not hang request handling.
 REDIS_TIMEOUT_SECS = 2.0
@@ -51,4 +52,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(health.router)
     app.include_router(metrics.router)
     app.include_router(hosts.router)
+    app.include_router(incidents.router)
+    app.include_router(rules.router)
+    register_exception_handlers(app)
     return app
