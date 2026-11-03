@@ -24,6 +24,7 @@ Timestamps are Hong Kong Time (HKT, UTC+8) and come from `date` (`TZ=UTC-8 date`
 | 5. Alert engine | 2026-11-02 21:53:20 | 2026-11-02 22:17:01 | Background engine, state machine, cooldowns, auto-resolve and the host-down rule. I approved six corrections Claude proposed to its own spec (see Decisions). | All gates pass with 128 tests, including the required idempotency, flapping, host-down and state machine tests. On compose, a spike opened an incident at about 33s and a stopped host at about 53s, both auto-resolved on recovery, and an api outage caused no false alarms. A Redis retry change Claude made turned out to make things worse, so it was measured and reverted. The CI workflow isn't verified on GitHub yet because nothing has been pushed. |
 | 6. Incident API and rules CRUD | 2026-11-03 09:52:06 | 2026-11-03 10:03:50 | Expose the state machine over HTTP and add rules CRUD. I approved five decisions Claude proposed (see Decisions). | All gates pass with 198 tests. A new test caught a real 500 on non-finite input, now fixed. All 20 deliberate breaks were caught. On compose, every endpoint and error code behaved as intended, a rule created over the API fired on all 5 hosts, and a manual resolve during a spike held through the 60s cooldown before a new incident opened. The CI workflow isn't verified on GitHub yet because nothing has been pushed. |
 | 7. SSE | 2026-11-03 10:07:25 | 2026-11-03 10:29:43 | Redis pub/sub to an SSE endpoint, with cleanup on disconnect. I approved five decisions Claude proposed. I also noticed the demo was taking too long and asked if it was done, which is when Claude found the run was invalid. | All gates pass with 212 tests, with the real agent publishing. This fixed a required test that had been failing whenever the stack was running. On compose, metrics and incident events streamed live, the stream survived a Redis restart, and `stop api` took about 1.6s with a stream open. One shutdown error line remains (problem #28). The CI workflow isn't verified on GitHub yet because nothing has been pushed. |
+| 8. Frontend and full compose | 2026-11-03 10:35:28 | 2026-11-03 10:53:57 | React dashboard, nginx, an api healthcheck and the CI web job. I approved four spec corrections Claude proposed, and chose no frontend test framework in the repo. | `docker compose down -v && up --build` brings up everything. A real browser ran the spec's full demo with no reload: the spike, the host going down, Ack and Resolve clicks, and recovery from API and Redis outages. It found a real phone layout bug, and looking at screenshots found a lingering error message; both are fixed. All Python gates and `npm run build` pass. The CI workflow isn't verified on GitHub yet because nothing has been pushed. |
 
 The session was paused between 2026-11-01 20:28:38 and 2026-11-02 21:07:19, before Phase 2 started, and between 2026-11-02 22:17:01 and 2026-11-03 09:52:06, before Phase 6 started.
 
@@ -59,6 +60,11 @@ The session was paused between 2026-11-01 20:28:38 and 2026-11-02 21:07:19, befo
 | 26 | 7 | **A false claim by Claude.** It proposed, and wrote in a code comment, that the subscription needs a connection without a read timeout because a quiet period would look like a failure. With a 2s read timeout added, a 2.5s quiet period still worked, because the blocking `listen()` doesn't apply that timeout. | Deliberate code break reported `MISSED` for 1 of 13; investigating showed the test was right and the claim was wrong | Corrected the comment. The quiet-period test stays as a regression check. |
 | 27 | 7 | **Invalid demo evidence, three times.** (1) The first run tested the old image: its `up --build` output was hidden by `tail -1`, `/v1/events` returned 404, and the script carried on. It also took about 7 minutes and I don't know why, because that output was hidden. (2) `TaskStop` didn't stop the script, which kept running and overlapped the next rebuild. (3) The second run's output was garbled ("Binary file matches") because the script cleared a file `curl` was still writing to. | I noticed it was taking too long and asked; Claude then read the output and saw the 404. Reading the output caught (3). | The script now aborts unless `/v1/events` serves `resync`, and it strips NUL bytes. None of those runs' results are used below. |
 | 28 | 7 | Not fixed: stopping the api with a stream open logs `ERROR: ASGI callable returned without completing response`. It exits 0 in about 1.6s and the client disconnects, so it looks cosmetic, but I didn't find the cause. | Reading the api log during the shutdown check | Left as is and recorded here. |
+| 29 | 8 | Spec gaps: a host going down publishes no event, so with SSE alone its tile would stay green. nginx resolves the api's address once at startup, so a recreated api would mean 502s. And after an error response, the browser's `EventSource` stops retrying for good. | Claude's review while planning and writing the phase. Measured afterwards: `EventSource` was permanently closed after a 502, and a static `proxy_pass` returned 502 once the api had a new IP | Hosts are refetched every 5s, nginx looks the api up per request, and the page reconnects by itself. |
+| 30 | 8 | The page scrolled sideways by 164px at phone width. The absolutely positioned hidden "Actions" header escaped the table's scroll container. | A browser check of `scrollWidth` at 390px | `position: relative` on the container. The check now passes. |
+| 31 | 8 | A refused-action error stayed on screen indefinitely. It was still showing long after, in the Reconnecting state. | Claude looking at the screenshots, not an automated check | The message now clears itself after 8s. |
+| 32 | 8 | The browser script called `innerText` on an SVG element, which aborted its first run. This was a script bug, not a dashboard bug. | Runtime error; the script stops at the first failure | Used `textContent`, and reran from a clean stack. |
+| 33 | 8 | `App.tsx` had a clumsy workaround that set state during render to pick a default host. | Claude's own review, before the first browser run | The hook now works out the selected host directly. |
 
 ## Decisions and trade-offs
 
@@ -96,6 +102,11 @@ The session was paused between 2026-11-01 20:28:38 and 2026-11-02 21:07:19, befo
 - **Every connection's first event is `resync`, sent again after the Redis subscription recovers.** The dashboard needs one rule, "on `resync`, refetch everything", and since the subscription is already live, nothing can be missed between the fetch and the stream.
 - **`sse-starlette` instead of a hand-written stream**, for pings, disconnect handling and not blocking server shutdown. Shutdown with a stream open was measured at about 1.6s.
 - **Known limit, accepted:** a subscription connection that dies silently, with no TCP close, isn't detected, because there is no read timeout. A Redis restart closes the connection, so it recovers in about 3s.
+- **Hosts are refetched every 5s on top of SSE**, because a host going down publishes no event. It's a little extra traffic in exchange for the tile being right.
+- **The dashboard shows Live or Reconnecting, with a banner when updates have stopped.** A monitoring page that silently goes stale looks healthy when it isn't.
+- **The chart breaks its line across gaps over 10s** rather than drawing through time with no data, and it has a fixed 0–100 axis so a small wobble doesn't look like a spike.
+- **Status never relies on color alone:** tiles and incidents always show a word and an icon.
+- **No frontend test framework in the repo (my choice).** Claude verified the page with a one-off Playwright script that isn't committed, so CI only checks that the frontend compiles. Frontend regressions wouldn't be caught automatically. It's listed as a known limitation.
 - **A single uvicorn worker**, so there is one alert engine per container. DB idempotency keeps duplicate engines safe anyway.
 
 ## Verification
@@ -206,6 +217,24 @@ The session was paused between 2026-11-01 20:28:38 and 2026-11-02 21:07:19, befo
   - `docker compose restart redis`: the same curl process stayed connected, `resync` arrived within about 3s, and `metrics` events resumed. The api logged `subscription lost` and then `subscription restored`.
   - `docker compose stop api` with a stream open: 1.63s, exit 0, and curl ended. Logged the error in problem #28.
 - Keep-alive pings: a fresh connection with the agent stopped got pings 15s and 30s after connecting. One earlier 17s window in the demo showed none. I think that was caused by the script clearing its output file, but I didn't confirm it.
+
+**Phase 8** (same environment, Node 24.21.0, Chromium through Playwright):
+- `npm run build` (strict TypeScript, then Vite): passes. `npm audit --omit=dev`: 0 vulnerabilities.
+- Python gates with the stack running: `ruff format --check .` and `ruff check .` pass, `mypy` has no issues, and `pytest -q` has 212 passed in about 74s.
+- `docker compose down -v && docker compose up --build -d --wait`: exit 0 in 24s with cached image layers. A first build without the cache will take longer, and I didn't time that. `--wait` now waits for the api's healthcheck.
+- Browser run against `http://localhost:8080` on a clean stack, final result `ALL PASSED`, with a marker confirming the page was never reloaded:
+  - Healthy: Live, 5 hosts up, the chart moving by itself, no incidents.
+  - `--spike-cpu host-3 --stop host-2`: the host-3 incident appeared at 34s, with the chart at 99%. host-2's tile turned red and said Down at 52s, and its incident appeared at 54s. The other 4 stayed up. The chart tooltip works.
+  - Real clicks: Ack, then Resolve. It stayed resolved through an engine tick with CPU still high.
+  - An action on an already-resolved incident showed `cannot move incident from resolved to acknowledged`, refetched, and the message cleared by itself.
+  - Normal agent restored: 5 hosts up.
+  - API stopped: Reconnecting and a stale-data banner. After restarting: Live again in 2s, banner gone.
+  - API recreated, and Redis restarted: the chart kept updating and the indicator was Live.
+  - 390px wide in dark mode: no horizontal page scroll.
+- Screenshots Claude looked at: fault state, Reconnecting state and phone dark mode.
+- Browser console errors: only the expected ones (a request the script blocked on purpose, the deliberate 409, and failed requests during the outage). None during the Redis restart, and no page errors.
+- nginx comparison, with the api forced onto a new IP: static `proxy_pass` went from 200 to 502; `web/nginx.conf` stayed at 200.
+- Not covered: the deliberate-break checks used in earlier phases, because there is no frontend test suite to run them against.
 
 ## Reviewer notes from the human
 

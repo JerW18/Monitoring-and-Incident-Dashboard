@@ -79,9 +79,11 @@ Modules:
 Vite, React and TypeScript, with no UI or chart libraries. The chart is a small hand-written SVG line chart. One page:
 - a host grid (green/red with latest values)
 - a CPU chart for the selected host (history from GET, then appended from SSE)
-- an incidents table with Ack and Resolve buttons, refetched on `incident` SSE events.
+- an incidents table with Ack and Resolve buttons, refetched on `incident` SSE events. A refused action shows its reason and refetches.
 
-Served by nginx, which proxies `/v1` to the api with SSE buffering off.
+On `resync` (always the first event) it refetches everything. Hosts are also refetched every 5s, because a host going down publishes no event: its Redis key just expires. A Live or Reconnecting indicator shows when updates have stopped, and the page reconnects by itself even after an error response, which makes the browser's `EventSource` give up for good.
+
+Served by non-root nginx, which proxies `/v1` to the api with SSE buffering off and looks the api up per request, so recreating the api container doesn't leave it on 502s.
 
 ## Tests (pytest against real Postgres and Redis)
 - Test isolation: a session fixture runs `alembic upgrade head` into a template database. Each test gets its own fresh copy (`CREATE DATABASE ... TEMPLATE`), so it starts from exactly what the real migration produces, with no second copy of the seed data. Redis uses DB 1 with `FLUSHDB`.
@@ -111,6 +113,7 @@ Served by nginx, which proxies `/v1` to the api with SSE buffering off.
 - `GET /v1/incidents` returns only the newest 200, with no pagination.
 - A Redis subscription connection that dies silently (no TCP close) isn't detected, so live updates would stop until the API restarts. A Redis restart is handled.
 - No multi-tenancy, notifications or Kubernetes.
+- No automated frontend tests: CI only checks that the frontend compiles. The dashboard was verified with a one-off browser script that isn't in the repo.
 - No metric retention or downsampling.
 - A single API instance and worker is assumed, with no engine leader election. DB idempotency keeps duplicate engines safe.
 - After a Postgres outage, hosts can look stale for one tick and briefly open false host-down incidents, which then auto-resolve.

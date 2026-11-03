@@ -43,6 +43,16 @@ services:
       API_KEY: ${API_KEY:-dev-key}
     ports:
       - "8000:8000"
+    healthcheck:
+      # The image has no curl.
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://localhost:8000/healthz', timeout=3)"
+      interval: 3s
+      timeout: 4s
+      retries: 20
     depends_on:
       migrate:
         condition: service_completed_successfully
@@ -60,6 +70,14 @@ services:
       API_KEY: ${API_KEY:-dev-key}
     depends_on:
       - api
+
+  web:
+    build: ./web
+    ports:
+      - "8080:8080"
+    depends_on:
+      api:
+        condition: service_healthy
 
 volumes:
   pgdata:
