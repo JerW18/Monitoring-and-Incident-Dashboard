@@ -288,6 +288,7 @@ The session was paused between 2026-11-01 20:28:38 and 2026-11-02 21:07:19, befo
   - The test commands in a brand-new venv: 246 passed.
 - `docker compose build --no-cache`: 39s, with the base images already downloaded. A new machine also has to download those, and I didn't time that.
 - The Mermaid diagram rendered in a real browser, and Claude looked at the result. That used the Mermaid library directly, not GitHub's own page.
+- After I pushed Phase 10, [CI run 41585945333](https://github.com/JerW18/Monitoring-and-Incident-Dashboard/actions/runs/41585945333) passed on `57ec898`. I then asked Claude to add the workflow account the brief requires to the README, which changed only documentation.
 
 ## Reviewer notes from the human
 

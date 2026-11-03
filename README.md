@@ -1,6 +1,6 @@
 # Monitoring and Incident Dashboard
 
-A small IT monitoring system. Hosts (or a simulator) send metrics to a Python API. Alert rules turn sustained bad metrics into incidents, which move from open to acknowledged to resolved. A React dashboard shows host status, metrics and incidents live.
+A small IT monitoring system. A simulator send metrics to a Python API. Alert rules turn sustained bad metrics into incidents, which move from open to acknowledged to resolved. A React dashboard shows host status, metrics and incidents live.
 
 Built as a take-home project with Claude Code. [AI_WORKFLOW.md](AI_WORKFLOW.md) records how it was directed and checked, and [SPEC.md](SPEC.md) has the full design.
 
@@ -103,6 +103,27 @@ pytest
 
 CI runs the same tests, plus `ruff format --check .`, `ruff check .`, `mypy`, and `npm ci && npm run build` in `web/`.
 
+## AI-assisted workflow
+
+**Tools:** Claude Code (VS Code extension) with Claude Opus 5.5. Claude wrote the code. I set the scope, approved the plans and made the decisions.
+
+**Key steps:**
+
+1. I wrote the scope, code standards and required tests in `CLAUDE.md`, and approved Claude's plan in `SPEC.md` before any code was written.
+2. We worked through 10 phases in order, from the skeleton to this README. For each one, Claude proposed a short plan, I approved it, and Claude built it, ran it and showed the command output as evidence.
+3. Each phase ended with an update to `AI_WORKFLOW.md`, including every problem found in Claude's output, followed by a pause for my review and a commit.
+
+**Time spent:** about 2h 45m of phase time, computed from the logged timestamps and spread over three days. That starts from when I started the project on 2026-11-01.
+
+**How the result was checked:**
+
+- 246 tests against real Postgres and Redis, including the required idempotency, flapping, host-down and state machine tests. They also pass under heavy CPU load in random order, and GitHub Actions runs the suite on every push.
+- 75 deliberate code breaks, to prove the tests can fail. This exposed several weak tests.
+- Fault injection on the running stack, and a real browser driving the dashboard, including clicking Ack and Resolve.
+- Real outages of Postgres, Redis and the API while everything was running.
+
+These checks found 42 logged problems in Claude's output. They include fixes that made things worse, claims that were false when measured, and a 500 during a real Postgres outage that passing tests had missed. The full account is in [AI_WORKFLOW.md](AI_WORKFLOW.md).
+
 ## Known limitations
 
 **Out of scope for this project:**
@@ -119,5 +140,3 @@ CI runs the same tests, plus `ruff format --check .`, `ruff check .`, `mypy`, an
 - A Redis subscription connection that dies with no TCP close isn't detected, so live updates would stop until the API restarts. A normal Redis restart is handled.
 - There are no automated frontend tests. CI only checks that the frontend compiles. The dashboard was checked with a one-off browser script that isn't in this repo.
 - Incident ids have gaps, because `ON CONFLICT DO NOTHING` uses up a sequence value each time.
-
-**Known issue:** stopping the API with a live stream open logs `ASGI callable returned without completing response`. It still exits cleanly in under 2 seconds, and I haven't found the cause.
