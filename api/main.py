@@ -10,7 +10,8 @@ from redis.asyncio import Redis
 from api.alerts.engine import run_engine
 from api.config import Settings
 from api.errors import register_exception_handlers
-from api.routes import health, hosts, incidents, metrics, rules
+from api.events import EventHub
+from api.routes import events, health, hosts, incidents, metrics, rules
 
 # A hung Redis must not hang request handling.
 REDIS_TIMEOUT_SECS = 2.0
@@ -34,16 +35,17 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def lifespan(app: FastAPI) -> AsyncIterator[None]:
         app.state.pool = await asyncpg.create_pool(settings.database_url, min_size=1, max_size=10)
         app.state.redis = create_redis(settings.redis_url)
-        engine = None
+        app.state.hub = EventHub(settings.redis_url)
+        tasks = [asyncio.create_task(app.state.hub.run())]
         if settings.alert_engine_enabled:
-            engine = asyncio.create_task(run_engine(app.state.pool, app.state.redis, settings))
+            tasks.append(asyncio.create_task(run_engine(app.state.pool, app.state.redis, settings)))
         try:
             yield
         finally:
-            if engine:
-                engine.cancel()
+            for task in tasks:
+                task.cancel()
                 with suppress(asyncio.CancelledError):
-                    await engine
+                    await task
             await app.state.redis.aclose()
             await app.state.pool.close()
 
@@ -54,5 +56,6 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     app.include_router(hosts.router)
     app.include_router(incidents.router)
     app.include_router(rules.router)
+    app.include_router(events.router)
     register_exception_handlers(app)
     return app

@@ -26,7 +26,7 @@ web (Vite build, nginx) ── /v1/* proxied to api ── EventSource /v1/event
 - **One Python project at the repo root** with packages `api/` and `agent/`. It builds one Docker image: the `api`, `agent` and `migrate` services use the same image with different commands.
 - **asyncpg with raw SQL rather than an ORM.** The queries are few and specific: an `UNNEST` batch insert, `ON CONFLICT DO NOTHING`, and a compare-and-swap update. Plain SQL keeps those visible and reviewable. Alembic (via SQLAlchemy) is used only for migrations, never in request paths.
 - **SSE rather than WebSocket.** Traffic only goes server→client, SSE reconnects automatically and passes through nginx easily. Ack and resolve are plain POST requests.
-- **Fan-out:** one Redis pubsub listener task pushes to a set of bounded `asyncio.Queue`s, one per SSE client. The handler removes its queue in a `finally` block on disconnect. If a slow client's queue is full, that client's events are dropped rather than blocking the others.
+- **Fan-out:** one Redis pubsub listener task pushes to a set of bounded `asyncio.Queue`s, one per SSE client. The handler removes its queue in a `finally` block on disconnect. If a slow client's queue is full, its stream ends rather than blocking the others or silently losing events: the browser reconnects and refetches. The listener reconnects by itself after a Redis failure. Every connection's first event is `resync`, sent again after the subscription recovers, which means "refetch everything". The channel is `events:{redis db}` because pub/sub ignores DB numbers, which keeps tests and a running stack apart.
 - **A single uvicorn worker**, so there is exactly one alert engine per container. Running duplicate engines would still be safe because incident creation is idempotent in the DB.
 
 ## Schema (Alembic revision `0001_init`, raw SQL)
@@ -42,13 +42,13 @@ web (Vite build, nginx) ── /v1/* proxied to api ── EventSource /v1/event
 ## API (`api/`)
 | Endpoint | Notes |
 |---|---|
-| `POST /v1/metrics` | `X-API-Key` compared to env `API_KEY` with `hmac.compare_digest`. Pydantic validation: 1–1000 samples, host_id `^[a-z0-9-]{1,64}$`, name `^[a-z_]{1,32}$`, finite value, optional ts within ±5 min (defaults to now). The key is checked before the body is read, and bodies over 1 MB get 413. One transaction does the hosts upsert (in sorted order, to avoid deadlocks) and an `INSERT ... SELECT FROM UNNEST($1::text[], ...)`. Then an atomic pipeline runs `HSET host:{id} <metric> <latest value> ...`, `EXPIRE host:{id} 30` and `PUBLISH events`. If Redis fails after the commit, the error is logged and the response is still 202, because the metrics are stored. Returns 202 `{accepted: n}` |
+| `POST /v1/metrics` | `X-API-Key` compared to env `API_KEY` with `hmac.compare_digest`. Pydantic validation: 1–1000 samples, host_id `^[a-z0-9-]{1,64}$`, name `^[a-z_]{1,32}$`, finite value, optional ts within ±5 min (defaults to now). The key is checked before the body is read, and bodies over 1 MB get 413. One transaction does the hosts upsert (in sorted order, to avoid deadlocks) and an `INSERT ... SELECT FROM UNNEST($1::text[], ...)`. Then an atomic pipeline runs `HSET host:{id} <metric> <latest value> ...`, `EXPIRE host:{id} 30` and `PUBLISH events:{db}`. If Redis fails after the commit, the error is logged and the response is still 202, because the metrics are stored. Returns 202 `{accepted: n}` |
 | `GET /v1/hosts` | Hosts from PG plus up/down and latest values from Redis (pipelined `HGETALL`). 503 if Redis is unreachable, because status is unknown |
 | `GET /v1/metrics?host_id&name&since` | Chart history. `since` is clamped to the last 1h, and the newest 2000 rows are returned, oldest first |
 | `GET /v1/incidents?status=` | Newest 200 incidents, with the rule name |
 | `POST /v1/incidents/{id}/ack`, `/resolve` | Go through the state machine. 404 if the incident is unknown, 409 on an invalid transition |
 | `GET/POST /v1/rules`, `PUT/DELETE /v1/rules/{id}` | Pydantic-validated: `duration_secs` 1–3600 (the engine loads that window every tick), `cooldown_secs` 0–86400, finite `threshold`. Only threshold rules can be created. `PUT` on the built-in rule accepts only `name`, `cooldown_secs` and `enabled`. Built-in rules can't be deleted. A duplicate name or a rule with history returns 409, from the database constraint |
-| `GET /v1/events` | SSE with keep-alive pings |
+| `GET /v1/events` | SSE with `resync`, `metrics` and `incident` events, and a keep-alive ping every 15s |
 | `GET /healthz` | `SELECT 1` and Redis `PING`, each with a 2s timeout. 200, or 503 naming the failing dependency |
 
 Modules:
@@ -109,6 +109,7 @@ Served by nginx, which proxies `/v1` to the api with SSE buffering off.
 ## Known limitations (README)
 - No user accounts, and no auth on dashboard endpoints (only ingest requires a key), so anyone who can reach the API can acknowledge incidents or change rules.
 - `GET /v1/incidents` returns only the newest 200, with no pagination.
+- A Redis subscription connection that dies silently (no TCP close) isn't detected, so live updates would stop until the API restarts. A Redis restart is handled.
 - No multi-tenancy, notifications or Kubernetes.
 - No metric retention or downsampling.
 - A single API instance and worker is assumed, with no engine leader election. DB idempotency keeps duplicate engines safe.

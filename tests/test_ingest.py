@@ -13,6 +13,7 @@ from pydantic import SecretStr, ValidationError
 from redis.asyncio import Redis
 
 from api.config import Settings
+from api.events import events_channel
 from api.routes.metrics import MAX_BODY_BYTES, MAX_HISTORY_ROWS, MAX_SAMPLES
 from tests.conftest import API_KEY, ClientFactory
 
@@ -197,7 +198,7 @@ async def test_partial_batch_keeps_other_metrics(
 
 async def test_event_is_published(client: httpx.AsyncClient, redis_client: Redis) -> None:
     async with redis_client.pubsub() as pubsub:
-        await pubsub.subscribe("events")
+        await pubsub.subscribe(events_channel(redis_client))
         await pubsub.get_message(timeout=2)  # the subscribe confirmation
         await post(client, sample(value=7))
         message = await pubsub.get_message(ignore_subscribe_messages=True, timeout=2)

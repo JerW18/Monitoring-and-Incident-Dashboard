@@ -12,6 +12,7 @@ from redis.exceptions import RedisError
 from api.alerts import engine
 from api.alerts.engine import evaluate_once, run_engine
 from api.config import Settings
+from api.events import events_channel
 from api.incidents import acknowledge, cooldown_key, resolve
 from api.main import create_redis
 from tests.conftest import API_KEY, ClientFactory
@@ -104,7 +105,7 @@ async def test_many_concurrent_evaluators_open_exactly_one_incident(
 ) -> None:
     await add_samples(db, BAD)
     async with redis_client.pubsub() as pubsub:
-        await pubsub.subscribe("events")
+        await pubsub.subscribe(events_channel(redis_client))
         await pubsub.get_message(timeout=2)  # the subscribe confirmation
 
         await asyncio.gather(*(evaluate_once(db, redis_client, settings) for _ in range(50)))

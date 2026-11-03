@@ -17,7 +17,7 @@ from pydantic import (
 from redis.exceptions import RedisError
 
 from api.auth import require_api_key
-from api.events import EVENTS_CHANNEL
+from api.events import events_channel
 
 log = logging.getLogger(__name__)
 router = APIRouter()
@@ -138,11 +138,12 @@ async def update_redis(request: Request, rows: list[tuple[str, str, float, datet
             for host_id, name, value, ts in rows
         ],
     }
-    pipe = request.app.state.redis.pipeline(transaction=True)
+    redis = request.app.state.redis
+    pipe = redis.pipeline(transaction=True)
     for host_id, values in latest_values(rows).items():
         pipe.hset(f"host:{host_id}", mapping=values)
         pipe.expire(f"host:{host_id}", ttl)
-    pipe.publish(EVENTS_CHANNEL, json.dumps(event))
+    pipe.publish(events_channel(redis), json.dumps(event))
     try:
         await pipe.execute()
     except RedisError:

@@ -22,6 +22,7 @@ pydantic_core==2.50.2
 python-dotenv==1.2.4
 redis==8.1.0
 SQLAlchemy==2.1.6
+sse-starlette==3.6.0
 starlette==1.10.0
 typing-inspection==0.4.4
 typing_extensions==4.16.0
