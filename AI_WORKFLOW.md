@@ -2,6 +2,19 @@
 
 I update this log at the end of every phase. It records only what actually happened in the session.
 
+## Summary
+
+- **Tools:** Claude Code with Claude Opus 5.5. Claude wrote the code and the first draft of this log. I set the scope and rules in `CLAUDE.md`, approved a plan before each phase, made the decisions it raised, and made nearly all the commits.
+- **Key steps:** 10 phases, from skeleton to README, each one built, run and evidenced before the next. Phases ended with a pause for my review.
+- **Time:** about 2h 44m of phase time, computed from the timeline below.
+- **How I checked the result:**
+  - 246 tests against real Postgres and Redis, and CI on GitHub.
+  - Deliberate code breaks, to prove the tests can fail.
+  - Fault injection on the running stack, and a real browser driving the dashboard.
+  - Real outages of Postgres, Redis and the API.
+  - The README followed from a fresh clone.
+- **What that found:** 42 logged problems in AI output, including wrong fixes and false claims from Claude, a required test that failed whenever the stack was running, and an API returning 500s in a real outage despite passing tests. The most useful habit was measuring claims rather than accepting them.
+
 ## Tools and setup
 
 - **Tool:** Claude Code (VS Code extension) on Windows 11
@@ -26,8 +39,11 @@ Timestamps are Hong Kong Time (HKT, UTC+8) and come from `date` (`TZ=UTC-8 date`
 | 7. SSE | 2026-11-03 10:07:25 | 2026-11-03 10:29:43 | Redis pub/sub to an SSE endpoint, with cleanup on disconnect. I approved five decisions Claude proposed. I also noticed the demo was taking too long and asked if it was done, which is when Claude found the run was invalid. | All gates pass with 212 tests, with the real agent publishing. This fixed a required test that had been failing whenever the stack was running. On compose, metrics and incident events streamed live, the stream survived a Redis restart, and `stop api` took about 1.6s with a stream open. One shutdown error line remains (problem #28). The CI workflow isn't verified on GitHub yet because nothing has been pushed. |
 | 8. Frontend and full compose | 2026-11-03 10:35:28 | 2026-11-03 10:53:57 | React dashboard, nginx, an api healthcheck and the CI web job. I approved four spec corrections Claude proposed, and chose no frontend test framework in the repo. | `docker compose down -v && up --build` brings up everything. A real browser ran the spec's full demo with no reload: the spike, the host going down, Ack and Resolve clicks, and recovery from API and Redis outages. It found a real phone layout bug, and looking at screenshots found a lingering error message; both are fixed. All Python gates and `npm run build` pass. The CI workflow isn't verified on GitHub yet because nothing has been pushed. |
 | 9. Tests | 2026-11-03 12:48:49 | 2026-11-03 13:20:52 | Complete the test suite. The required tests already existed, so Claude measured for gaps first, and I approved its plan. I asked Claude to push to GitHub, which ran CI for the first time and passed. | 246 tests pass, including under heavy CPU load in random order. A real Postgres outage found that the API returned 500s, and after two wrong attempts it now returns 503s. The flakiness run found a real flaky test, now fixed. A false host-down limitation was removed. |
+| 10. README | 2026-11-03 13:30:11 | 2026-11-03 13:40:45 | Write the README with a Mermaid diagram, summarize this log, and compute the total time. | Every command in the README was run from a fresh clone: `ALL PASSED`, with 246 tests passing in a brand-new venv. CI passed on `b7095fe`. |
 
 The session was paused between 2026-11-01 20:28:38 and 2026-11-02 21:07:19, before Phase 2 started, between 2026-11-02 22:17:01 and 2026-11-03 09:52:06, before Phase 6 started, and between 2026-11-03 11:14 (approximately, when I paused after the first CI run) and 12:48:49, before Phase 9 started. Claude measured coverage and wrote the Phase 9 plan at 11:08 before that pause.
+
+**Total elapsed time, computed from the timestamps above:** 2h 44m of phase time across 11 rows, over 1 day 17h 30m of wall-clock time including the pauses. Phase time runs from each phase's start to its end, so it includes waiting for builds and test runs, and my review time inside a phase. It leaves out my review between phases. The total starts at the restart on 2026-11-01, and work before that restart isn't counted.
 
 ## Problems found in AI output
 
@@ -72,6 +88,9 @@ The session was paused between 2026-11-01 20:28:38 and 2026-11-02 21:07:19, befo
 | 37 | 9 | A known limitation Claude wrote in Phase 5 was never measured: false host-down incidents after a Postgres outage. The first outage run didn't show any, but only by timing luck. | Reasoning about tick timing after the measurement | A failed tick now restarts the host-down grace period, covered by a test, and the limitation is removed from `SPEC.md`. |
 | 38 | 9 | Claude's outage script left a fake `probe` host in my local database, which would have gone down and opened a false incident. | Claude reading the output of its own script | Removed it, and the script now uses a real host. |
 | 39 | 9 | A wrong type in the new test file (`redis.keys` is typed as bytes). | `mypy` | Fixed. |
+| 40 | 10 | The first Mermaid diagram rendered, but its lines ran behind Redis to reach Postgres, which made it hard to read. | Claude looking at a screenshot of the rendered diagram | Redrew it with the API as one box. |
+| 41 | 10 | Claude told me the logged phases added up to about 2h 18m. That was added by hand, and wrong. | Computing it from the timestamps | The total below is computed. |
+| 42 | 10 | The first README check failed in 3s because `bash` from Python resolved to WSL's bash, which can't reach Docker. This was a script bug, not a README bug. | Reading the error output | Pointed the script at Git Bash. |
 
 ## Decisions and trade-offs
 
@@ -258,6 +277,17 @@ The session was paused between 2026-11-01 20:28:38 and 2026-11-02 21:07:19, befo
   - During: `/healthz` 503; `POST /v1/metrics`, `/v1/hosts`, `/v1/incidents` and `/v1/rules` all `503 {"detail":"database unavailable"}`; dashboard page 200; SSE stream connected.
   - After: `/healthz` 200 in under 1s, ingest 202, all 5 hosts up, and rows growing. Incidents stayed at 11, so no false ones opened.
   - API log tracebacks fell from 128-130 to 15. 9 of those are the engine's failed ticks, logged on purpose; I didn't look at the other 6.
+
+**Phase 10** (same environment):
+- [CI run 41584229816](https://github.com/JerW18/Monitoring-and-Incident-Dashboard/actions/runs/41584229816) passed on `b7095fe`, which includes all of Phase 9.
+- README from a fresh `git clone` in an empty folder, with a one-off script that extracts the README's bash blocks and runs each line, `ALL PASSED`:
+  - `docker compose up --build`, run detached: exit 0, with `http://localhost:8080` and `http://localhost:8000/docs` returning 200.
+  - The fault commands: `High CPU` on host-3 after 33s and `Host down` on host-2 after 52s. The README says about 35s and 55s.
+  - Every `curl` returned the expected code (202, 200, 201), an invalid move returned 409, and `/v1/events` started with `resync`.
+  - `docker compose start agent`: no open incidents 12s later.
+  - The test commands in a brand-new venv: 246 passed.
+- `docker compose build --no-cache`: 39s, with the base images already downloaded. A new machine also has to download those, and I didn't time that.
+- The Mermaid diagram rendered in a real browser, and Claude looked at the result. That used the Mermaid library directly, not GitHub's own page.
 
 ## Reviewer notes from the human
 
